@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "DeepSeek 网页版",
+    "description": "在原生右侧栏 Browser 标签页中打开 DeepSeek 网页版，随时回到同一会话。",
+    "detail": "docs/DETAIL.md"
+  }
+}

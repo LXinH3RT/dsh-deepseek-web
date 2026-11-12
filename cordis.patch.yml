@@ -1,0 +1,14 @@
+# Bundle layer for dsh-deepseek-web.
+#
+# `name:` is path-relative on purpose: DSH anchors a relative name to the
+# directory of the patch that declared it (anchorInsertedPluginNames), so this
+# row always loads this bundle's own index.js regardless of the installed folder
+# name. Keep it relative.
+#
+# No `config:` block here. Defaults live in the Host Config schema; override
+# them from the profile patch with `- id: dsh-deepseek-web / config:`. The
+# Loader replaces the whole config object, so write every field when overriding.
+
+- insert:
+    - id: dsh-deepseek-web
+      name: './index.js'

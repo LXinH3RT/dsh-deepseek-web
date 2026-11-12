@@ -1,0 +1,70 @@
+{
+  "name": "dsh-deepseek-web",
+  "version": "1.0.0",
+  "description": "Open the DeepSeek web app inside the native right-Sidebar Browser tab of DeepSeek Harness.",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "test"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LXinH3RT/dsh-deepseek-web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LXinH3RT/dsh-deepseek-web/issues"
+  },
+  "homepage": "https://github.com/LXinH3RT/dsh-deepseek-web#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-sidebar-browser"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.2-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "sidebar",
+    "browser"
+  ],
+  "license": "MIT"
+}
