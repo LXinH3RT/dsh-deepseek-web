@@ -4,13 +4,20 @@
 // this file. The page loads it as a script and `window.__ModuleLoader__` supplies
 // `require`; React comes from the browser module table.
 //
-// This plugin does not render a web page of its own. It opens the shipped
-// right-Sidebar Browser tab (`@deepseek-ai/dsh-client-ui-sidebar-browser`) at a
-// configured HTTPS address. That keeps the host's theme, toolbar, navigation
-// history and keyboard habits, and leaves the web app's own conversation flows
-// (new chat, typing, streaming replies, resuming) entirely to the web app.
+// This plugin renders no page of its own. It owns one action at the sidebar foot
+// (`sidebar.footer.action`) whose button opens the shipped right-Sidebar Browser
+// tab (`@deepseek-ai/dsh-client-ui-sidebar-browser`) at a configured HTTPS
+// address. That keeps the host's theme, toolbar, navigation history and keyboard
+// habits, and leaves the web app's own conversation flows (new chat, typing,
+// streaming replies, resuming) entirely to the web app.
 //
 // Verified against the implementation shipped in DSH 0.2.2-rc.2:
+//   - `ctx.slots.inject('sidebar.footer.action', ...)` renders inside the
+//     sidebar's `footArea`, above Settings, in both the wide and the rail width.
+//     The owner supplies `{ wide }` as its only runtime prop.
+//   - The sidebar clips overflow, so the popup is `position: fixed` and anchored
+//     to the measured trigger rectangle (the same technique the shipped Cordis
+//     panel uses).
 //   - `ctx.sidebarRight.openTab('browser', { params: { url } })` opens a
 //     Browser tab; the URL goes through the same validation as the address bar.
 //   - `ctx.sidebarRight.openTabs.getSnapshot()` yields
@@ -18,9 +25,8 @@
 //   - `ctx.sidebarRight.focus(tabId)` reveals an existing tab.
 //   - Browser declares `multiple: true`, so every `openTab` would otherwise
 //     create a fresh tab; reusing an existing one is what preserves a session.
-//   - `ctx.slots.inject('conversation.composer.dock', ...)` is the official
-//     decoration seat; `ctx.shortcuts.register` and `ctx.configForms.get` are
-//     optional services requested at runtime with `ctx.inject`.
+//   - `ctx.shortcuts.register` and `ctx.configForms.get` are optional services
+//     requested at runtime with `ctx.inject`.
 
 window.__ModuleLoader__.load({
   id: 'dsh-deepseek-web',
@@ -35,22 +41,30 @@ window.__ModuleLoader__.load({
     var NS = 'dsh-deepseek-web'
     var DICT = 'dshDeepseekWeb'
     var BROWSER_KIND = 'browser'
+    var FOOTER_SLOT = 'sidebar.footer.action'
     var DEFAULT_URL = 'https://chat.deepseek.com'
     var VERIFY_DELAY_MS = 2500
+    var NOTICE_KEY = 'dsh-deepseek-web.environment-notice-dismissed'
 
     // ------------------------------------------------------------------ copy
 
     var zh = {
-      open: 'DeepSeek 网页版',
+      trigger: 'DeepSeek 网页版',
+      panelTitle: 'DeepSeek 网页版',
+      open: '打开',
       newTab: '新建标签',
       help: '页面异常',
       opening: '正在打开…',
       retry: '重试',
       diagnostics: '检查项',
+      close: '关闭',
       diagnosticsTitle: '加载失败或状态异常时，按顺序检查',
       buttonHint: '在右侧栏打开或回到 DeepSeek 网页版',
       shortcutLabel: '打开 DeepSeek 网页版',
       shortcutDisabled: '该快捷键已在插件配置中关闭。',
+      noticeTitle: '环境提示',
+      noticeBody: 'DeepSeek 网页版运行在内嵌浏览器中，站点可能提示「环境异常」并建议使用官方客户端。插件只在本机打开该页面，不读取、转发或代理对话内容。遇到该提示时，可在 Browser 工具栏选择「在系统浏览器打开」，或直接使用官方客户端。',
+      noticeDismiss: '不再提示',
       errNoService: '右侧栏服务未就绪，无法打开标签页。',
       errNoBrowser: '内置 Browser 标签页未启用；请在「插件」中启用 dsh-client-ui-sidebar-browser，Web 配置还需在 profile patch 中设置 disabled: false。',
       errNoSession: '当前没有前台会话，右侧栏无法放置标签页；进入一个会话后重试。',
@@ -67,16 +81,22 @@ window.__ModuleLoader__.load({
     }
 
     var en = {
-      open: 'DeepSeek Web',
+      trigger: 'DeepSeek Web',
+      panelTitle: 'DeepSeek Web',
+      open: 'Open',
       newTab: 'New tab',
       help: 'Page issue',
       opening: 'Opening…',
       retry: 'Retry',
       diagnostics: 'Checks',
+      close: 'Close',
       diagnosticsTitle: 'When loading fails or the tab looks wrong, check in order',
       buttonHint: 'Open or return to the DeepSeek web app in the right sidebar',
       shortcutLabel: 'Open DeepSeek Web',
       shortcutDisabled: 'This shortcut is disabled in the plugin settings.',
+      noticeTitle: 'Environment note',
+      noticeBody: 'The DeepSeek web app runs inside an embedded browser, and the site may report an unsupported environment and suggest its official client. This plugin only opens the page locally; it never reads, relays or proxies a conversation. If that notice appears, use "Open in system browser" in the Browser toolbar, or use the official client directly.',
+      noticeDismiss: "Don't show again",
       errNoService: 'The right sidebar service is unavailable, so no tab can be opened.',
       errNoBrowser: 'The built-in Browser tab is disabled. Enable dsh-client-ui-sidebar-browser in Plugins; Web profiles also need disabled: false in the profile patch.',
       errNoSession: 'No session is on screen, so the sidebar cannot place a tab. Enter a session and retry.',
@@ -117,24 +137,16 @@ window.__ModuleLoader__.load({
     var C = {
       label: 'var(--dsw-alias-label-primary, inherit)',
       secondary: 'var(--dsw-alias-label-secondary, inherit)',
-      tertiary: 'var(--dsw-alias-label-tertiary, inherit)',
+      tertiary: 'var(--dsw-alias-label-secondary, inherit)',
       border: 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.25))',
-      warn: 'var(--dsw-alias-state-warn-label, #b45309)',
-      link: 'var(--dsw-alias-link, inherit)',
-      radius: 'var(--dsw-radius-xs, 4px)',
+      borderSubtle: 'var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.25))',
+      warn: 'var(--dsw-alias-state-warn-primary, #b45309)',
+      link: 'var(--dsw-alias-brand-primary, inherit)',
+      hover: 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.12))',
+      surface: 'var(--dsw-alias-bg-overlay, Canvas)',
+      radius: '4px',
     }
 
-    var WRAP = {
-      boxSizing: 'border-box',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-start',
-      gap: '4px',
-      color: C.label,
-      fontFamily: 'inherit',
-      fontSize: '12px',
-      lineHeight: '18px',
-    }
     var ROW = { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }
     var BTN = {
       boxSizing: 'border-box',
@@ -155,14 +167,86 @@ window.__ModuleLoader__.load({
     var HINT = { margin: 0, color: C.tertiary, fontSize: '12px', lineHeight: '18px' }
     var ERROR_BOX = {
       display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
-      maxWidth: '560px', color: C.warn, fontSize: '12px', lineHeight: '18px',
+      color: C.warn, fontSize: '12px', lineHeight: '18px',
     }
-    var HINT_BOX = {
-      boxSizing: 'border-box', maxWidth: '560px', padding: '8px 10px',
-      border: '1px solid ' + C.border, borderRadius: C.radius,
+    var SECTION = {
+      boxSizing: 'border-box', padding: '8px 10px',
+      border: '1px solid ' + C.border, borderRadius: '8px',
       color: C.secondary, fontSize: '12px', lineHeight: '18px',
     }
     var HINT_LINE = { margin: '2px 0' }
+
+    // -------------------------------------------------------------- sidebar fit
+    // The footer action slot supplies `{ wide }`: a call-to-action row at full
+    // width, a 36px round button inside the rail.
+
+    var STYLE_ID = 'dsh-deepseek-web-style'
+    var CSS_TEXT = [
+      '[data-dsh-deepseek-web-trigger]{transition:background-color .12s ease}',
+      '@media (hover:hover){[data-dsh-deepseek-web-trigger]:hover{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}}',
+      '[data-dsh-deepseek-web-trigger][data-open]{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}',
+      '[data-dsh-deepseek-web-trigger]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary, currentColor);outline-offset:2px}',
+      '[data-dsh-deepseek-web-panel] button:hover{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}',
+      '[data-dsh-deepseek-web-panel] button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary, currentColor);outline-offset:2px}',
+    ].join('')
+
+    /** Install the hover/focus rules once; the caller disposes them. */
+    function installStyle() {
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+        return function () {}
+      }
+      var existing = document.getElementById(STYLE_ID)
+      if (existing !== null) return function () {}
+      var node = document.createElement('style')
+      node.id = STYLE_ID
+      node.textContent = CSS_TEXT
+      document.head.appendChild(node)
+      return function () {
+        if (node.parentNode !== null) node.parentNode.removeChild(node)
+      }
+    }
+
+    var LAYER_WIDE = {
+      position: 'relative', flex: 'none', display: 'flex', alignItems: 'center',
+      boxSizing: 'border-box', width: '100%', height: '42px', margin: '8px 0 0',
+    }
+    var LAYER_RAIL = {
+      position: 'relative', flex: 'none', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', width: '36px', height: '36px',
+    }
+    var BADGE = {
+      display: 'inline-flex', alignItems: 'center', gap: '8px',
+      boxSizing: 'border-box', width: '100%', height: '42px', margin: '0 -2px',
+      padding: '0 10px 0 8px', border: 'none', borderRadius: '12px',
+      background: 'transparent', color: C.label,
+      fontFamily: 'inherit', fontSize: '14px', lineHeight: '20px',
+      textAlign: 'left', cursor: 'pointer', overflow: 'hidden',
+    }
+    var BADGE_RAIL = {
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      boxSizing: 'border-box', width: '36px', height: '36px', padding: 0,
+      border: 'none', borderRadius: '50%', background: 'transparent',
+      color: C.label, cursor: 'pointer',
+    }
+    var BADGE_LABEL = {
+      minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }
+    var PANEL = {
+      position: 'fixed', zIndex: 30, display: 'flex', flexDirection: 'column',
+      boxSizing: 'border-box', width: '360px', maxWidth: 'calc(100vw - 24px)',
+      maxHeight: '60vh', overflowY: 'auto', padding: '12px', gap: '8px',
+      border: '1px solid ' + C.borderSubtle,
+      borderRadius: '12px',
+      background: C.surface,
+      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.24)',
+      color: C.label, fontFamily: 'inherit', fontSize: '12px', lineHeight: '18px',
+    }
+    var PANEL_HEAD = {
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
+    }
+    var PANEL_TITLE = {
+      fontSize: '14px', fontWeight: 500, lineHeight: '20px', color: C.label,
+    }
 
     // -------------------------------------------------------------- settings
 
@@ -189,6 +273,42 @@ window.__ModuleLoader__.load({
       if (typeof shortcut === 'boolean') settings.registerShortcut = shortcut
     }
 
+    // ---------------------------------------------------------------- notice
+    // The first run explains the embedded-environment caveat once. The flag
+    // lives in localStorage so it survives DSH restarts; without storage the
+    // notice stays hidden rather than reappearing on every launch.
+
+    var notice = { pending: false, autoOpened: false }
+
+    function storageOf() {
+      try {
+        return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null
+      } catch (error) {
+        return null
+      }
+    }
+
+    function probeNotice() {
+      var store = storageOf()
+      if (store === null) return false
+      try {
+        return store.getItem(NOTICE_KEY) !== '1'
+      } catch (error) {
+        return false
+      }
+    }
+
+    function dismissNotice() {
+      notice.pending = false
+      var store = storageOf()
+      if (store === null) {
+        setState({})
+        return
+      }
+      try { store.setItem(NOTICE_KEY, '1') } catch (error) { /* Private mode keeps it per run. */ }
+      setState({})
+    }
+
     // ----------------------------------------------------------------- state
 
     var state = { phase: 'idle', code: null, detail: null, showDiagnostics: false }
@@ -196,15 +316,19 @@ window.__ModuleLoader__.load({
 
     function getState() { return state }
 
-    function setState(patch) {
-      state = Object.assign({}, state, patch)
+    function emit() {
       listeners.forEach(function (fn) {
         try { fn(state) } catch (error) {
           console.error('dsh-deepseek-web: state listener failed', error)
         }
       })
-      // A shortcut can fire while the dock component is unmounted. Keep a trace
-      // so the failure is never silent.
+    }
+
+    function setState(patch) {
+      state = Object.assign({}, state, patch)
+      emit()
+      // A shortcut can fire while the panel is unmounted. Keep a trace so the
+      // failure is never silent.
       if (state.phase === 'error') console.warn('dsh-deepseek-web:', state.code, state.detail || '')
     }
 
@@ -254,7 +378,7 @@ window.__ModuleLoader__.load({
       timers.clear()
     }
 
-    // ------------------------------------------------------------- controller
+    // ------------------------------------------------------------ controller
 
     function createController(ctx) {
       function browserTabs() {
@@ -382,65 +506,185 @@ window.__ModuleLoader__.load({
 
     // -------------------------------------------------------------- component
 
-    function Launcher(props) {
-      var pair = React.useState(getState())
-      var s = pair[0]
-      var setS = pair[1]
+    /** The DeepSeek mark: a speech bubble drawn with the current text colour. */
+    function Icon() {
+      return h(
+        'svg',
+        {
+          width: '16', height: '16', viewBox: '0 0 16 16', fill: 'none',
+          'aria-hidden': 'true', focusable: 'false',
+        },
+        h('path', {
+          d: 'M8 1.4C4.3 1.4 1.4 3.9 1.4 6.9c0 1.7.9 3.2 2.3 4.2V14l2.5-1.3c.6.1 1.2.2 1.8.2 3.7 0 6.6-2.5 6.6-5.5S11.7 1.4 8 1.4Z',
+          fill: 'currentColor',
+        }),
+      )
+    }
+
+    function Panel(props) {
+      var wide = props.wide !== false
+      var t = props.t
+
+      var snapshot = React.useState(getState())
+      var status = snapshot[0]
+      var setStatus = snapshot[1]
+
+      var openPair = React.useState(false)
+      var isOpen = openPair[0]
+      var setOpen = openPair[1]
+
+      var rootRef = React.useRef(null)
+      var anchorPair = React.useState(undefined)
+      var anchor = anchorPair[0]
+      var setAnchor = anchorPair[1]
 
       React.useEffect(function () {
-        return subscribe(function (next) { setS(next) })
+        return subscribe(function (next) { setStatus(next) })
       }, [])
 
-      var t = props.t
-      return h(
-        'div',
-        { style: WRAP, 'data-plugin': NS },
+      // Explain the embedded-environment caveat once, on the very first run.
+      React.useEffect(function () {
+        if (!notice.pending || notice.autoOpened) return
+        notice.autoOpened = true
+        setOpen(true)
+      }, [])
+
+      // The sidebar clips overflow, so the surface is fixed and hugs the
+      // trigger through a measured offset instead of document flow.
+      React.useLayoutEffect(function () {
+        if (!isOpen) return
+        var place = function () {
+          var node = rootRef.current
+          if (!node || typeof node.getBoundingClientRect !== 'function') return
+          var rect = node.getBoundingClientRect()
+          var height = typeof window !== 'undefined' ? window.innerHeight : 0
+          var left = Math.max(8, Math.min(rect.left, (typeof window !== 'undefined' ? window.innerWidth : 0) - 368))
+          setAnchor({ left: left, bottom: Math.max(8, height - rect.top + 8) })
+        }
+        place()
+        if (typeof window === 'undefined') return undefined
+        window.addEventListener('resize', place)
+        return function () { window.removeEventListener('resize', place) }
+      }, [isOpen])
+
+      React.useEffect(function () {
+        if (!isOpen) return undefined
+        var onPointer = function (event) {
+          var node = rootRef.current
+          if (node && event.target instanceof Node && node.contains(event.target)) return
+          setOpen(false)
+        }
+        var onKey = function (event) {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('pointerdown', onPointer, true)
+        document.addEventListener('keydown', onKey)
+        return function () {
+          document.removeEventListener('pointerdown', onPointer, true)
+          document.removeEventListener('keydown', onKey)
+        }
+      }, [isOpen])
+
+      var body = [
         h(
           'div',
-          { style: ROW },
+          { key: 'head', style: PANEL_HEAD },
+          h('span', { style: PANEL_TITLE }, t('panelTitle')),
           h('button', {
-            type: 'button', style: BTN_PRIMARY, title: t('buttonHint'),
-            onClick: function () { props.open(false) },
-          }, t('open')),
-          h('button', {
-            type: 'button', style: BTN,
-            onClick: function () { props.open(true) },
-          }, t('newTab')),
-          h('button', {
-            type: 'button', style: BTN_QUIET,
-            onClick: function () { props.report() },
-          }, t('help')),
-          s.phase === 'opening' ? h('span', { style: HINT }, t('opening')) : null,
+            key: 'close', type: 'button', style: BTN_QUIET,
+            onClick: function () { setOpen(false) },
+          }, t('close')),
         ),
-        s.phase === 'error'
+      ]
+
+      if (notice.pending) {
+        body.push(h(
+          'div',
+          { key: 'notice', style: SECTION, role: 'status' },
+          h('div', { style: { fontWeight: 500, marginBottom: '4px', color: C.label } }, t('noticeTitle')),
+          h('p', { style: HINT_LINE }, t('noticeBody')),
+          h('button', {
+            key: 'dismiss', type: 'button',
+            style: Object.assign({}, BTN_QUIET, { paddingLeft: 0 }),
+            onClick: function () { props.dismissNotice() },
+          }, t('noticeDismiss')),
+        ))
+      }
+
+      body.push(h(
+        'div',
+        { key: 'actions', style: ROW },
+        h('button', {
+          type: 'button', style: BTN_PRIMARY, title: t('buttonHint'),
+          onClick: function () { props.open(false) },
+        }, t('open')),
+        h('button', {
+          type: 'button', style: BTN,
+          onClick: function () { props.open(true) },
+        }, t('newTab')),
+        h('button', {
+          type: 'button', style: BTN_QUIET,
+          onClick: function () { props.report() },
+        }, t('help')),
+        status.phase === 'opening' ? h('span', { key: 'opening', style: HINT }, t('opening')) : null,
+      ))
+
+      if (status.phase === 'error') {
+        body.push(h(
+          'div',
+          { key: 'error', style: ERROR_BOX, role: 'alert' },
+          h('span', null, errorText(t, status)),
+          h(
+            'span',
+            { style: ROW },
+            h('button', {
+              type: 'button', style: BTN_QUIET,
+              onClick: function () { props.retry() },
+            }, t('retry')),
+            h('button', {
+              type: 'button', style: BTN_QUIET,
+              onClick: function () { props.toggleDiagnostics() },
+            }, t('diagnostics')),
+          ),
+        ))
+      }
+
+      if (status.showDiagnostics) {
+        body.push(h(
+          'div',
+          { key: 'checks', style: SECTION },
+          h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, t('diagnosticsTitle')),
+          diagnosticLines(t).map(function (line, index) {
+            return h('p', { key: index, style: HINT_LINE }, line)
+          }),
+        ))
+      }
+
+      return h(
+        'div',
+        { ref: rootRef, style: wide ? LAYER_WIDE : LAYER_RAIL, 'data-plugin': NS },
+        isOpen && anchor !== undefined
           ? h(
-              'div',
-              { style: ERROR_BOX, role: 'alert' },
-              h('span', null, errorText(t, s)),
-              h(
-                'span',
-                { style: ROW },
-                h('button', {
-                  type: 'button', style: BTN_QUIET,
-                  onClick: function () { props.retry() },
-                }, t('retry')),
-                h('button', {
-                  type: 'button', style: BTN_QUIET,
-                  onClick: function () { props.toggleDiagnostics() },
-                }, t('diagnostics')),
-              ),
+              'section',
+              { style: Object.assign({}, PANEL, anchor), 'aria-label': t('panelTitle'), 'data-dsh-deepseek-web-panel': '' },
+              body,
             )
           : null,
-        s.showDiagnostics
-          ? h(
-              'div',
-              { style: HINT_BOX },
-              h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, t('diagnosticsTitle')),
-              diagnosticLines(t).map(function (line, index) {
-                return h('p', { key: index, style: HINT_LINE }, line)
-              }),
-            )
-          : null,
+        h(
+          'button',
+          {
+            type: 'button',
+            style: wide ? BADGE : BADGE_RAIL,
+            title: t('buttonHint'),
+            'aria-label': t('buttonHint'),
+            'aria-expanded': isOpen,
+            'data-dsh-deepseek-web-trigger': '',
+            'data-open': isOpen ? '' : undefined,
+            onClick: function () { setOpen(!isOpen) },
+          },
+          h(Icon),
+          wide ? h('span', { style: BADGE_LABEL }, t('trigger')) : null,
+        ),
       )
     }
 
@@ -449,13 +693,14 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       var t = makeReader(ctx)
       if (!ctx.slots || typeof ctx.slots.inject !== 'function') {
-        console.error('dsh-deepseek-web: no slots service; the launcher stays unmounted')
+        console.error('dsh-deepseek-web: no slots service; the sidebar action stays unmounted')
         return
       }
       var controller = createController(ctx)
+      notice.pending = probeNotice()
 
       // Host configuration is optional. Request the service at runtime so a
-      // client without a settings projection still mounts the launcher.
+      // client without a settings projection still mounts the action.
       try {
         if (typeof ctx.inject === 'function') {
           ctx.inject(['configForms'], function (inner) {
@@ -538,9 +783,9 @@ window.__ModuleLoader__.load({
       }
 
       try {
-        ctx.slots.inject('conversation.composer.dock', function () {
+        ctx.slots.inject(FOOTER_SLOT, function () {
           return ctx.slots.register({
-            name: 'conversation.composer.dock',
+            name: FOOTER_SLOT,
             id: NS,
             order: 60,
             locale: DICT,
@@ -551,15 +796,18 @@ window.__ModuleLoader__.load({
                 retry: controller.retry,
                 report: controller.report,
                 toggleDiagnostics: controller.toggleDiagnostics,
+                dismissNotice: dismissNotice,
+                notice: notice,
               }
             },
-          }, Launcher)
+          }, Panel)
         })
       } catch (error) {
-        console.error('dsh-deepseek-web: registering the launcher failed', error)
+        console.error('dsh-deepseek-web: registering the sidebar action failed', error)
       }
 
       ctx.effect(function () { return clearTimers }, 'dsh-deepseek-web: timers')
+      ctx.effect(function () { return installStyle() }, 'dsh-deepseek-web: styles')
     }
 
     exports.apply = apply

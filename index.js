@@ -1,8 +1,8 @@
 // Host half of dsh-deepseek-web.
 //
-// The visible surface is entirely client-side: this bundle contributes a
-// launcher in the Conversation composer dock and a shortcut, both of which open
-// the shipped right-Sidebar Browser tab. Nothing in the Host needs to run, so
+// The visible surface is entirely client-side: this bundle contributes an action
+// at the sidebar foot and a shortcut, both of which open the shipped
+// right-Sidebar Browser tab. Nothing in the Host needs to run, so
 // `apply` is intentionally empty — but the module must exist because the
 // Loader row points at it.
 //

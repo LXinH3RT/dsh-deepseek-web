@@ -1,21 +1,22 @@
 # dsh-deepseek-web
 
-在 DeepSeek Harness（DSH）现有界面中接入 DeepSeek 网页版。插件把网页版作为**原生右侧栏 Browser 标签页**打开，而不是另造网页容器，因此地址栏、前进/后退、重新载入、标签页拖拽与快捷键都保持 DSH 原有风格和操作习惯。
+在 DeepSeek Harness（DSH）现有界面中接入 DeepSeek 网页版。插件把网页版作为**原生右侧栏 Browser 标签页**打开，而不是另造网页容器，因此地址栏、前进/后退、重新载入、标签页拖拽与快捷键都保持 DSH 原有风格和操作习惯。入口按钮位于**左侧边栏底部**、设置按钮上方的动作区。
 
 ## 工作方式
 
-DSH 桌面版内置 `@deepseek-ai/dsh-client-ui-sidebar-browser`：桌面配置下用 Electron `<webview>` 承载页面，Web 配置下用带 sandbox 的 iframe。插件不重复实现这部分能力，只做四件事：
+DSH 桌面版内置 `@deepseek-ai/dsh-client-ui-sidebar-browser`：桌面配置下用 Electron `<webview>` 承载页面，Web 配置下用带 sandbox 的 iframe。插件不重复实现这部分能力，只做五件事：
 
-1. 在对话输入框下方（`conversation.composer.dock`）提供一个启动入口；
+1. 在左侧边栏底部动作区（`sidebar.footer.action`）提供一个入口按钮，点击展开面板（收窄为 56px 图标栏时只显示圆形图标）；
 2. 通过 `ctx.sidebarRight.openTab('browser', { params: { url } })` 打开或新建网页版标签页；
 3. 通过 `ctx.sidebarRight.openTabs` 查找已有 Browser 标签页并 `focus` 复用，避免每次点击都新建标签而丢失当前对话；
-4. 注册快捷键 `Ctrl/Cmd + Alt + D`，并提供配置、状态校验与错误提示。
+4. 注册快捷键 `Ctrl/Cmd + Alt + D`，并提供配置、状态校验与错误提示；
+5. 首次运行时在面板中给出一次「内嵌环境」提示，说明站点可能报告环境异常并建议官方客户端，可标记为不再提示。
 
 网页版自身的「新对话 / 输入问题 / 查看回复 / 继续会话」全部由网页承载，插件不读取、注入或转发页面内容。
 
 | 核心流程 | 承载方式 |
 | --- | --- |
-| 打开对话 | 「DeepSeek 网页版」打开标签页；「新建标签」另开一个；网页版内点「新对话」 |
+| 打开对话 | 面板内「打开」打开标签页；「新建标签」另开一个；网页版内点「新对话」 |
 | 输入问题 | 网页版输入框 |
 | 查看回复 | 网页版页面（含流式输出） |
 | 继续会话 | 复用已有 Browser 标签页（`keepMounted` 保留页面状态）；或从网页版历史记录进入 |
@@ -27,7 +28,7 @@ dsh-deepseek-web/
 ├── package.json          # 清单：bundle patch、client 入口、导出资源
 ├── cordis.patch.yml      # 插入一行 Loader 记录（name 相对锚定）
 ├── index.js              # Host 半部：apply 为空，持有配置 schema
-├── client.js             # Client 半部：入口、快捷键、状态机、错误提示
+├── client.js             # Client 半部：侧栏入口、快捷键、状态机、错误提示
 ├── icon.svg              # 图标
 ├── locale/{zh,en}.json   # 显示元数据
 ├── docs/DETAIL.md        # 插件详情页内容
@@ -91,9 +92,16 @@ cd <插件目录> && node test/smoke.mjs
 - 同一进程内，同一工作区的标签页共享该分区，因此新建标签页不会重复要求登录。
 - 插件不保存、不读取账号、Cookie 或令牌。
 
+## 首次运行提示
+
+首次在某一浏览器配置中运行时，面板会自动展开，并显示一条「环境提示」：DeepSeek 网页版运行在内嵌浏览器里，站点可能报告环境异常并建议使用官方客户端；插件仅在本机打开该页面，不读取或转发对话内容。点「不再提示」后写入本地存储，之后不再出现。
+
+- 提示只解释与引导，不拦截打开操作，也不改变站点行为。
+- 本地存储不可用时（例如受限的存储策略）提示保持隐藏，避免每次启动重复打扰。
+
 ## 错误提示
 
-插件在启动入口下方显示状态；出错时给出可读文案、重试按钮与检查项。页面自身的加载失败由内置 Browser 的原生失败提示负责，两者互补。
+状态显示在侧栏入口展开后的面板内；出错时给出可读文案、重试按钮与检查项。页面自身的加载失败由内置 Browser 的原生失败提示负责，两者互补。
 
 | 状态 | 触发条件 | 提示 |
 | --- | --- | --- |
@@ -124,7 +132,13 @@ cd <插件目录> && node test/smoke.mjs
 5. **地址变化不可完全追踪**：网页内部 History API 与 fragment 跳转不产生新的导航记录；插件只按「是否存在 Browser 标签页」复用，不推断页面 URL。
 6. **Web 配置的 sandbox**：默认 sandbox 会限制顶层跳转与下载；取消 sandbox 只对当前标签页临时生效。
 7. **快捷键冲突**：`Ctrl/Cmd + Alt + D` 可能被系统或其它应用占用，可设 `registerShortcut: false` 关闭，只用按钮入口。
-8. 未在 Web 配置与 macOS/Linux 上做实机验证；`openTabs`、`focus`、`openTab` 的行为来自 DSH 0.2.2-rc.2 桌面版源码与包文档。
+8. **侧栏底部空间有限**：`sidebar.footer.action` 与内置「插件」入口同处设置按钮上方，条目较多时该区域会被压缩；插件按 42px 行高与 36px 圆形按钮（收窄栏）渲染，不参与折叠逻辑。
+9. 未在 Web 配置与 macOS/Linux 上做实机验证；`openTabs`、`focus`、`openTab` 的行为来自 DSH 0.2.2-rc.2 桌面版源码与包文档。
+
+## 版本记录
+
+- **1.1.0**：入口从对话输入框下方迁到左侧边栏底部动作区（`sidebar.footer.action`）；面板改为锚定入口的浮层；新增首次运行的内嵌环境提示（可关闭且不再出现）。
+- **1.0.0**：首个版本，入口位于对话输入框下方（`conversation.composer.dock`）。
 
 ## 卸载
 

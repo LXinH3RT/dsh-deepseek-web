@@ -50,6 +50,8 @@ check('locale export declared', typeof manifest.exports?.['./locale/*.json'] ===
 check('icon export declared', typeof manifest.exports?.['./icon'] === 'string')
 check('browser activation ordered after built-in Browser',
   (manifest.dsh?.client?.inject ?? []).includes('@deepseek-ai/dsh-client-ui-sidebar-browser'))
+check('sidebar activation precedes the footer action',
+  (manifest.dsh?.client?.inject ?? []).includes('@deepseek-ai/dsh-client-ui-sidebar'))
 
 for (const [key, target] of Object.entries(manifest.exports ?? {})) {
   if (key.includes('*')) continue
@@ -83,6 +85,13 @@ check('client uses the built-in browser kind', /openTab\(BROWSER_KIND/.test(clie
 check('client validates the URL', /function validateUrl/.test(client))
 check('client reuses existing tabs', /reuseExistingTab/.test(client) && /\.focus\(/.test(client))
 check('client has an error state machine', /no-browser/.test(client) && /not-appeared/.test(client))
+check('client mounts at the sidebar foot', /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
+check('client no longer mounts in the composer dock',
+  !/conversation\.composer\.dock/.test(client))
+check('client anchors the panel to the trigger',
+  /getBoundingClientRect/.test(client) && /position: 'fixed'/.test(client))
+check('client reads the first-run notice flag',
+  /probeNotice/.test(client) && /\.environment-notice-dismissed/.test(client))
 check('client has no top-level ESM import/export',
   !/^\s*(import|export)\s/m.test(client))
 check('client has no emoji', !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(client))
@@ -209,12 +218,17 @@ if (runtimeModule !== null) {
   const plain = mount(undefined)
   check('apply mounts with optional services absent', plain.threw === null,
     plain.threw ? plain.threw.message : '')
-  check('launcher registered in the composer dock',
-    plain.registered.some((entry) => entry.name === 'conversation.composer.dock' &&
+  check('sidebar action registered at the sidebar foot',
+    plain.registered.some((entry) => entry.name === 'sidebar.footer.action' &&
       entry.id === 'dsh-deepseek-web'))
   check('slot inject exposes the public API',
     plain.api !== null && typeof plain.api.open === 'function' &&
-    typeof plain.api.retry === 'function')
+    typeof plain.api.retry === 'function' && typeof plain.api.dismissNotice === 'function')
+  check('first-run notice stays hidden without storage',
+    plain.api !== null && plain.api.notice.pending === false)
+  let dismissThrew = null
+  try { plain.api.dismissNotice() } catch (error) { dismissThrew = error.message }
+  check('dismissing the notice never throws', dismissThrew === null, dismissThrew ?? '')
   check('shortcut registered', plain.shortcuts.length === 1 &&
     plain.shortcuts[0].id === 'dsh-deepseek-web.open')
 
