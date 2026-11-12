@@ -132,7 +132,7 @@ cd <插件目录> && node test/smoke.mjs
 5. **地址变化不可完全追踪**：网页内部 History API 与 fragment 跳转不产生新的导航记录；插件只按「是否存在 Browser 标签页」复用，不推断页面 URL。
 6. **Web 配置的 sandbox**：默认 sandbox 会限制顶层跳转与下载；取消 sandbox 只对当前标签页临时生效。
 7. **快捷键冲突**：`Ctrl/Cmd + Alt + D` 可能被系统或其它应用占用，可设 `registerShortcut: false` 关闭，只用按钮入口。
-8. **侧栏底部空间有限**：`sidebar.footer.action` 与内置「插件」入口同处设置按钮上方，条目较多时该区域会被压缩；插件按 42px 行高与 36px 圆形按钮（收窄栏）渲染，不参与折叠逻辑。
+8. **侧栏底部空间有限**：`sidebar.footer.action` 渲染在设置按钮上方，与面板列表（「插件」「自动化任务」「更多」）同处侧栏底部，条目较多时该区域会被压缩；插件按 42px 行高与 36px 圆形按钮（收窄栏）渲染，不参与折叠逻辑。
 9. 未在 Web 配置与 macOS/Linux 上做实机验证；`openTabs`、`focus`、`openTab` 的行为来自 DSH 0.2.2-rc.2 桌面版源码与包文档。
 
 ## 版本记录
