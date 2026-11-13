@@ -99,6 +99,10 @@ check('client anchors the panel to the trigger',
   /getBoundingClientRect/.test(client) && /position: 'fixed'/.test(client))
 check('client reads the first-run notice flag',
   /probeNotice/.test(client) && /\.environment-notice-dismissed/.test(client))
+check('client registers the bundle configuration page',
+  /plugins\.bundle\.config/.test(client) && /plugins\.row\.config/.test(client))
+check('client never echoes the stored password into the page',
+  /type: 'password'/.test(client) && /op: 'unset', path: \['password'\]/.test(client))
 check('client has no top-level ESM import/export',
   !/^\s*(import|export)\s/m.test(client))
 check('client has no emoji', !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(client))
@@ -177,6 +181,7 @@ check('factory returns a Cordis-shaped module',
 
 function mount(configValue, options = {}) {
   const opened = [], focused = [], registered = [], shortcuts = []
+  let mountWrites = null
   const sessionId = 'sessionId' in options ? options.sessionId : 's1'
   const tabs = options.tabs ?? [{ sessionId: 's1', tabId: 't1', kind: 'browser', contentId: 'c1' }]
   let expanded = options.expanded !== false
@@ -189,9 +194,9 @@ function mount(configValue, options = {}) {
     locale: { register: () => () => {}, bind: () => (key) => key },
     slots: {
       inject: (_name, callback) => { callback(); return () => {} },
-      register: (options_) => {
+      register: (options_, component) => {
         api = typeof options_.inject === 'function' ? options_.inject() : null
-        registered.push(options_)
+        registered.push({ ...options_, component })
         return () => {}
       },
     },
@@ -207,15 +212,26 @@ function mount(configValue, options = {}) {
     effect,
     inject: (names, callback) => {
       if (names[0] === 'configForms' && configValue !== undefined) {
+        const writes = []
+        const scope = {
+          getSnapshot: () => ({
+            status: 'ready',
+            value: configValue,
+            user: {},
+            revision: 3,
+            writable: true,
+          }),
+          subscribe: () => () => {},
+          mutate: (ops, revision) => { writes.push({ ops, revision }); return Promise.resolve(true) },
+        }
         callback({
           configForms: {
-            get: () => ({
-              getSnapshot: () => ({ value: configValue }),
-              subscribe: () => () => {},
-            }),
+            get: () => scope,
+            whileServed: (_names, register) => register(),
           },
           effect,
         })
+        mountWrites = writes
       } else if (names[0] === 'shortcuts') {
         callback({
           shortcuts: { register: (entry) => { shortcuts.push(entry); return () => {} } },
@@ -226,7 +242,7 @@ function mount(configValue, options = {}) {
   }
   let threw = null
   try { runtimeModule.apply(ctx) } catch (error) { threw = error }
-  return { api, opened, focused, registered, shortcuts, tabs, threw, isExpanded: () => expanded }
+  return { api, opened, focused, registered, shortcuts, tabs, threw, isExpanded: () => expanded, writes: mountWrites }
 }
 
 if (runtimeModule !== null) {
@@ -256,6 +272,29 @@ if (runtimeModule !== null) {
   })
   check('configForms path mounts', configured.threw === null,
     configured.threw ? configured.threw.message : '')
+  check('a served namespace registers the bundle configuration page',
+    configured.registered.some((entry) => entry.name === 'plugins.bundle.config' &&
+      entry.key === 'dsh-deepseek-web') &&
+    configured.registered.some((entry) => entry.name === 'plugins.row.config' &&
+      entry.key === 'dsh-deepseek-web#dsh-deepseek-web'))
+  const page = configured.registered.find((entry) => entry.name === 'plugins.bundle.config')
+  check('the configuration page is a component with a summary view',
+    page !== undefined && typeof page.component === 'function' &&
+      typeof page.inject === 'function' && page.inject().t('save') === 'save')
+  if (page !== undefined && typeof page.component === 'function') {
+    let summary = null, rendered = null, renderThrew = null
+    try {
+      summary = page.component({ view: 'summary', ...page.inject() })
+      rendered = page.component({ view: 'page', ...page.inject() })
+    } catch (error) { renderThrew = error.message }
+    check('the configuration page renders both views', renderThrew === null, renderThrew ?? '')
+    check('the summary view is a string', typeof summary === 'string' && summary.length > 0)
+    const flat = JSON.stringify(rendered)
+    check('the page offers every configurable field',
+      flat.includes('dsh-deepseek-web-url') && flat.includes('dsh-deepseek-web-account') &&
+      flat.includes('dsh-deepseek-web-password'))
+    check('the password field is masked', flat.includes('"type":"password"'))
+  }
   if (configured.api !== null) {
     configured.api.activate()
     check('one click reuses the session browser tab',

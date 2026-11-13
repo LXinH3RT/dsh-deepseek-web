@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Open the DeepSeek web app inside the native right-Sidebar Browser tab of DeepSeek Harness.",
   "private": true,
   "type": "module",

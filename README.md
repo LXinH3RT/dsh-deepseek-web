@@ -67,6 +67,8 @@ cd <插件目录> && node test/smoke.mjs
 
 默认值为 `url = https://chat.deepseek.com`、`reuseExistingTab = true`、`registerShortcut = true`、`autoFill = true`、`account = ''`、`password = ''`，由 Host 的 `Config` schema 提供。
 
+**在界面里修改**：「插件」→ 找到 **DeepSeek 网页版** → 进入该包的详情页，描述下方的表单即本插件的配置页。表单直接读写 profile 的配置记录，保存后立即生效，无需重启，也不必手工编辑 YAML。表单包含地址、复用、快捷键、自动填入四个开关类字段，以及账号与密码两个输入框：密码框不回显已保存的值，留空表示保持不变，另有「清除已保存的密码」按钮。
+
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `url` | string | `https://chat.deepseek.com` | 打开的地址；仅接受不含账号密码的 http/https |
@@ -76,7 +78,7 @@ cd <插件目录> && node test/smoke.mjs
 | `account` | string | 空 | 登录账号（手机号或邮箱），留空则只填密码 |
 | `password` | string | 空 | 登录密码；留空则不启用自动填入 |
 
-覆盖方式：在 profile patch 中按 id 覆盖，**Loader 会整体替换 `config`，需写全字段**：
+也可以直接在 profile patch 中按 id 覆盖，**Loader 会整体替换 `config`，需写全字段**：
 
 ```yaml
 - id: dsh-deepseek-web
@@ -143,6 +145,7 @@ cd <插件目录> && node test/smoke.mjs
 
 ## 版本记录
 
+- **2.0.1**：新增插件配置页，在「插件」→ DeepSeek 网页版 详情页直接填写地址、开关与账号密码，无需编辑 profile patch；密码框不回显已保存的值，并提供显式清除。
 - **2.0.0**：入口按钮本身就是打开动作，去掉面板内的「打开」「新建标签页」按钮；复用判定改用当前会话的 `tabsIn` 而非跨会话恢复的 `openTabs`，聚焦前先展开右侧栏，修复「点了没反应」；新增登录表单自动填入（`autoFill` / `account` / `password`）。
 - **1.1.0**：入口从对话输入框下方迁到左侧边栏底部动作区（`sidebar.footer.action`）；面板改为锚定入口的浮层；新增首次运行的内嵌环境提示（可关闭且不再出现）。
 - **1.0.0**：首个版本，入口位于对话输入框下方（`conversation.composer.dock`）。

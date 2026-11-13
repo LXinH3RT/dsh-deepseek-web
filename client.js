@@ -57,6 +57,12 @@ window.__ModuleLoader__.load({
     var FILL_ATTEMPTS = 12
     var FILL_INTERVAL_MS = 800
 
+    // The configuration page occupies the two seats a bundle's own settings can
+    // take in the Plugins tab: the package page, keyed by the package name, and
+    // the page of the row `cordis.patch.yml` inserts, keyed `package#row`.
+    var BUNDLE_KEY = NS
+    var ROW_KEY = BUNDLE_KEY + '#' + BUNDLE_KEY
+
     // ------------------------------------------------------------------ copy
 
     var zh = {
@@ -84,6 +90,34 @@ window.__ModuleLoader__.load({
       diag3: '若站点拒绝嵌入、需要下载或弹窗：点 Browser 工具栏的「在系统浏览器打开」。',
       diag4: '确认网络与系统代理可达；内置 Browser 是真实浏览器导航，不走应用内的 web 工具。',
       diag5: '对话、输入与回复由网页版自身承载；插件不读取、注入或转发网页内容（自动填入凭据除外）。',
+      settingsTitle: 'DeepSeek 网页版设置',
+      settingsSummary: '侧栏底部图标打开的内置浏览器页面、标签页复用、快捷键与登录表单自动填入。',
+      urlLabel: '网页地址',
+      urlHint: '默认 https://chat.deepseek.com；只接受 http/https 地址。',
+      reuseLabel: '复用已打开的标签页',
+      reuseHint: '开启时，当前会话已有 DeepSeek 标签页就直接聚焦它；关闭时每次都新开一个。',
+      shortcutSwitchLabel: '启用快捷键',
+      shortcutSwitchHint: '关闭后，快捷键不再打开页面，侧栏图标的点击不受影响。',
+      autoFillLabel: '自动填入登录信息',
+      autoFillHint: '打开页面后，若登录表单里有密码框，就用下面的账号与密码填好并尝试点击登录按钮。',
+      accountLabel: '账号',
+      accountHint: '手机号或邮箱；留空则不自动填入。',
+      passwordLabel: '密码',
+      passwordHint: '明文保存在本机插件配置文件中，仅用于本地自动填入；留空则不自动填入。',
+      passwordStored: '已保存密码；留空表示保持不变。',
+      passwordMissing: '尚未保存密码。',
+      passwordClear: '清除已保存的密码',
+      save: '保存',
+      saving: '保存中…',
+      saved: '已保存',
+      discard: '放弃修改',
+      readOnly: '本部署的设置为只读。',
+      unavailable: '该插件当前未加载，暂时无法配置。',
+      rejected: '本部署没有接受这次改动，内容已保留供你检查。',
+      conflict: '配置已被其他改动更新，请重新载入后再试。',
+      effective: '当前生效',
+      overridden: '已覆盖',
+      empty: '未指定',
     }
 
     var en = {
@@ -111,6 +145,34 @@ window.__ModuleLoader__.load({
       diag3: 'If the site refuses embedding or needs downloads/popups, use "Open in system browser" in the Browser toolbar.',
       diag4: 'Check network and system proxy reachability. The built-in Browser performs real navigation, not an in-app web fetch.',
       diag5: 'Conversations, input and replies belong to the web app; this plugin never reads, injects or relays page content (except typing the configured credentials).',
+      settingsTitle: 'DeepSeek Web settings',
+      settingsSummary: 'The sidebar-foot button, tab reuse, the shortcut, and automatic sign-in for the embedded page.',
+      urlLabel: 'Web address',
+      urlHint: 'Defaults to https://chat.deepseek.com; only http/https addresses are accepted.',
+      reuseLabel: 'Reuse an open tab',
+      reuseHint: 'On: a DeepSeek tab already open in this session is focused. Off: every click opens a new tab.',
+      shortcutSwitchLabel: 'Enable the shortcut',
+      shortcutSwitchHint: 'When off the shortcut stops opening the page; the sidebar button still works.',
+      autoFillLabel: 'Fill in the sign-in form',
+      autoFillHint: 'After the page opens, a visible password field is filled with the account and password below, and the sign-in button is clicked once.',
+      accountLabel: 'Account',
+      accountHint: 'Phone number or email. Leave blank to skip filling.',
+      passwordLabel: 'Password',
+      passwordHint: 'Stored in plain text in this machine’s plugin configuration, used only for local filling. Leave blank to skip filling.',
+      passwordStored: 'A password is stored; leave blank to keep it.',
+      passwordMissing: 'No password is stored yet.',
+      passwordClear: 'Clear the stored password',
+      save: 'Save',
+      saving: 'Saving…',
+      saved: 'Saved',
+      discard: 'Discard',
+      readOnly: 'This deployment stores settings read-only.',
+      unavailable: 'This plugin is not loaded, so it cannot be configured right now.',
+      rejected: 'The deployment did not accept this change; it was left for you to correct.',
+      conflict: 'The configuration changed elsewhere; reload and try again.',
+      effective: 'Effective value',
+      overridden: 'Overridden',
+      empty: 'not set',
     }
 
     /** Bind the dictionary through the locale service, with a language guess as fallback. */
@@ -765,6 +827,297 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ------------------------------------------------------------ settings page
+
+    /** Read a scope snapshot without letting a disposed scope throw. */
+    function readSnapshot(scope) {
+      if (!scope || typeof scope.getSnapshot !== 'function') return undefined
+      try {
+        var snapshot = scope.getSnapshot()
+        return snapshot && typeof snapshot === 'object' ? snapshot : undefined
+      } catch (error) {
+        return undefined
+      }
+    }
+
+    /** Whether the stored overrides carry `key`. */
+    function hasOwn(target, key) {
+      return target !== null && typeof target === 'object' &&
+        Object.prototype.hasOwnProperty.call(target, key)
+    }
+
+    var PAGE = {
+      boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '16px',
+      maxWidth: '760px', color: C.label, fontFamily: 'inherit',
+      fontSize: '13px', lineHeight: '20px',
+    }
+    var FIELD = { display: 'flex', flexDirection: 'column', gap: '6px' }
+    var PAGE_TITLE = { margin: 0, fontSize: '15px', fontWeight: 600, lineHeight: '22px' }
+    var FIELD_LABEL = { fontWeight: 500 }
+    var INPUT = {
+      boxSizing: 'border-box', width: '100%', padding: '7px 10px',
+      border: '1px solid ' + C.border, borderRadius: C.radius,
+      background: 'transparent', color: C.label, fontFamily: 'inherit',
+      fontSize: '13px', lineHeight: '20px',
+    }
+    var FLAGS = { display: 'flex', flexDirection: 'column', gap: '10px' }
+    var FLAG_ROW = { display: 'flex', alignItems: 'flex-start', gap: '8px' }
+    var ACTIONS = { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }
+    var PRIMARY_BTN = Object.assign({}, BTN, { padding: '5px 14px', borderColor: C.link, color: C.link })
+    var LINK_BTN = {
+      padding: 0, border: 'none', background: 'transparent', color: C.link,
+      fontFamily: 'inherit', fontSize: '12px', lineHeight: '18px', cursor: 'pointer',
+    }
+
+    /**
+     * The bundle's own configuration page.
+     *
+     * It occupies the two keyed seats a bundle's settings can take in the
+     * Plugins tab, so the owner wraps it in nothing: the page draws its own
+     * heading and save control. Every write goes through the Host revision, and
+     * `view: 'summary'` is the one line the page lists about the bundle.
+     */
+    function SettingsPage(props) {
+      var t = typeof props.t === 'function' ? props.t : function (key) { return key }
+      var scope = props.scope
+
+      var snapPair = React.useState(function () { return readSnapshot(scope) })
+      var snapshot = snapPair[0]
+      var setSnapshot = snapPair[1]
+
+      var draftPair = React.useState(null)
+      var draft = draftPair[0]
+      var setDraft = draftPair[1]
+
+      var busyPair = React.useState(false)
+      var busy = busyPair[0]
+      var setBusy = busyPair[1]
+
+      var noticePair = React.useState(null)
+      var notice = noticePair[0]
+      var setNotice = noticePair[1]
+
+      React.useEffect(function () {
+        if (!scope) return undefined
+        var alive = true
+        var update = function () { if (alive) setSnapshot(readSnapshot(scope)) }
+        var off
+        try {
+          off = typeof scope.subscribe === 'function' ? scope.subscribe(update) : undefined
+        } catch (error) { off = undefined }
+        update()
+        return function () {
+          alive = false
+          if (typeof off === 'function') {
+            try { off() } catch (error) { /* already released */ }
+          }
+        }
+      }, [scope])
+
+      if (props.view === 'summary') return t('settingsSummary')
+
+      if (snapshot === undefined) {
+        return h('p', { style: HINT }, t('unavailable'))
+      }
+
+      var value = snapshot.value && typeof snapshot.value === 'object' ? snapshot.value : {}
+      var writable = snapshot.writable === true
+      var disabled = !writable || busy
+      var fields = draft === null ? null : draft
+
+      var text = function (key) {
+        if (fields !== null && typeof fields[key] === 'string') return fields[key]
+        return typeof value[key] === 'string' ? value[key] : ''
+      }
+      var flag = function (key, fallback) {
+        if (fields !== null && typeof fields[key] === 'boolean') return fields[key]
+        return typeof value[key] === 'boolean' ? value[key] : fallback
+      }
+
+      var edit = function (key, next) {
+        var base = fields === null ? {} : fields
+        var copy = {}
+        for (var name in base) if (Object.prototype.hasOwnProperty.call(base, name)) copy[name] = base[name]
+        copy[key] = next
+        setDraft(copy)
+      }
+
+      var submit = function (ops, done) {
+        if (!writable) { setNotice({ ok: false, text: t('readOnly') }); return }
+        if (!scope || typeof scope.mutate !== 'function') {
+          setNotice({ ok: false, text: t('unavailable') })
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        var landed
+        try {
+          landed = scope.mutate(ops, snapshot.revision)
+        } catch (error) {
+          setBusy(false)
+          setNotice({ ok: false, text: t('rejected') })
+          return
+        }
+        Promise.resolve(landed).then(function (accepted) {
+          setBusy(false)
+          if (accepted) {
+            if (typeof done === 'function') done()
+            setSnapshot(readSnapshot(scope))
+            setNotice({ ok: true, text: t('saved') })
+            return
+          }
+          setNotice({ ok: false, text: t('rejected') })
+        }, function (error) {
+          setBusy(false)
+          var code = error && (error.code || (error.cause && error.cause.code))
+          setNotice({ ok: false, text: code === 'SETTINGS_CONFLICT' ? t('conflict') : t('rejected') })
+        })
+      }
+
+      var save = function () {
+        if (fields === null) return
+        var ops = []
+        var put = function (key, next) {
+          ops.push({ op: 'set', path: [key], value: next })
+        }
+        if (typeof fields.url === 'string') put('url', fields.url.trim() === '' ? DEFAULT_URL : fields.url.trim())
+        if (typeof fields.reuseExistingTab === 'boolean') put('reuseExistingTab', fields.reuseExistingTab)
+        if (typeof fields.registerShortcut === 'boolean') put('registerShortcut', fields.registerShortcut)
+        if (typeof fields.autoFill === 'boolean') put('autoFill', fields.autoFill)
+        if (typeof fields.account === 'string') put('account', fields.account.trim())
+        // An empty password box keeps the stored one, so the page never has to
+        // echo a secret back into the browser to keep it.
+        if (typeof fields.password === 'string' && fields.password !== '') put('password', fields.password)
+        if (ops.length === 0) return
+        submit(ops, function () { setDraft(null) })
+      }
+
+      var clearPassword = function () {
+        submit([{ op: 'unset', path: ['password'] }], function () { setDraft(null) })
+      }
+
+      var textField = function (key, label, hint, extra) {
+        return h(
+          'div',
+          { style: FIELD, key: key },
+          h('label', { style: FIELD_LABEL, htmlFor: 'dsh-deepseek-web-' + key }, label),
+          h('input', Object.assign({
+            id: 'dsh-deepseek-web-' + key,
+            type: 'text',
+            style: INPUT,
+            value: text(key),
+            disabled: disabled,
+            spellCheck: false,
+            autoComplete: 'off',
+            onChange: function (event) { edit(key, event.target.value) },
+          }, extra || {})),
+          h('p', { style: HINT }, hint),
+        )
+      }
+
+      var flagField = function (key, fallback, label, hint) {
+        return h(
+          'label',
+          { style: FLAG_ROW, key: key },
+          h('input', {
+            type: 'checkbox',
+            checked: flag(key, fallback),
+            disabled: disabled,
+            onChange: function (event) { edit(key, event.target.checked) },
+          }),
+          h(
+            'span',
+            null,
+            h('span', { style: FIELD_LABEL }, label),
+            h('br'),
+            h('span', { style: HINT }, hint),
+          ),
+        )
+      }
+
+      // Whether a password is already stored. The rendered value may be absent
+      // because the Host strips `role('secret')` fields on the wire; the
+      // overrides layer still reports the key, so presence is what counts.
+      var overrides = snapshot.user && typeof snapshot.user === 'object' ? snapshot.user : undefined
+      var stored = overrides !== undefined && hasOwn(overrides, 'password')
+        ? overrides.password !== '' && overrides.password !== undefined
+        : typeof value.password === 'string' && value.password !== ''
+
+      return h(
+        'div',
+        { style: PAGE, 'data-plugin-config': NS },
+        h(
+          'div',
+          { style: FIELD },
+          h('h3', { style: PAGE_TITLE }, t('settingsTitle')),
+          h('p', { style: HINT }, t('settingsSummary')),
+        ),
+        textField('url', t('urlLabel'), t('urlHint'), { placeholder: DEFAULT_URL, type: 'url' }),
+        h(
+          'div',
+          { style: FLAGS },
+          flagField('reuseExistingTab', true, t('reuseLabel'), t('reuseHint')),
+          flagField('registerShortcut', true, t('shortcutSwitchLabel'), t('shortcutSwitchHint')),
+          flagField('autoFill', true, t('autoFillLabel'), t('autoFillHint')),
+        ),
+        textField('account', t('accountLabel'), t('accountHint'), { autoComplete: 'username' }),
+        h(
+          'div',
+          { style: FIELD },
+          h('label', { style: FIELD_LABEL, htmlFor: 'dsh-deepseek-web-password' }, t('passwordLabel')),
+          h('input', {
+            id: 'dsh-deepseek-web-password',
+            type: 'password',
+            style: INPUT,
+            // The stored secret is never echoed back into the field: an empty
+            // box means "keep what is stored", which is also how a user clears
+            // it deliberately (the paid-off button below).
+            value: fields !== null && typeof fields.password === 'string' ? fields.password : '',
+            disabled: disabled,
+            spellCheck: false,
+            autoComplete: 'new-password',
+            placeholder: stored ? t('passwordStored') : t('passwordMissing'),
+            onChange: function (event) { edit('password', event.target.value) },
+          }),
+          h('p', { style: HINT }, t('passwordHint')),
+        ),
+        h(
+          'p',
+          { style: HINT },
+          t('effective') + '：' + (typeof value.url === 'string' && value.url !== '' ? value.url : DEFAULT_URL) +
+            (hasOwn(snapshot.user, 'url') ? ' · ' + t('overridden') : ''),
+        ),
+        h(
+          'div',
+          { style: ACTIONS },
+          h('button', {
+            type: 'button',
+            style: disabled ? Object.assign({}, PRIMARY_BTN, { opacity: 0.55 }) : PRIMARY_BTN,
+            disabled: disabled || fields === null,
+            onClick: save,
+          }, busy ? t('saving') : t('save')),
+          fields === null
+            ? null
+            : h('button', {
+                type: 'button', style: LINK_BTN, disabled: busy,
+                onClick: function () { setDraft(null); setNotice(null) },
+              }, t('discard')),
+          stored
+            ? h('button', {
+                type: 'button', style: LINK_BTN, disabled: disabled,
+                onClick: clearPassword,
+              }, t('passwordClear'))
+            : null,
+          notice === null
+            ? null
+            : h('span', {
+                style: { color: notice.ok ? C.secondary : C.warn, fontSize: '12px', lineHeight: '18px' },
+                role: 'status',
+              }, notice.text),
+        ),
+      )
+    }
+
     // ------------------------------------------------------------------ apply
 
     function apply(ctx) {
@@ -801,8 +1154,35 @@ window.__ModuleLoader__.load({
               try {
                 off = scope && typeof scope.subscribe === 'function' ? scope.subscribe(read) : undefined
               } catch (error) { off = undefined }
+
+              // The Host serves this namespace, so the Plugins tab can host the
+              // page. Both seats are keyed slots: the owner draws no heading of
+              // its own around them, so the page carries its own.
+              var stops = []
+              var face = function () { return { t: t, scope: scope } }
+              var seats = [
+                ['plugins.bundle.config', BUNDLE_KEY],
+                ['plugins.row.config', ROW_KEY],
+              ]
+              for (var index = 0; index < seats.length; index += 1) {
+                try {
+                  stops.push(ctx.slots.inject(seats[index][0], (function (name, key) {
+                    return function () {
+                      return ctx.slots.register({ name: name, key: key, locale: DICT, inject: face }, SettingsPage)
+                    }
+                  })(seats[index][0], seats[index][1])))
+                } catch (error) {
+                  console.warn('dsh-deepseek-web: registering the settings page failed', error)
+                }
+              }
+
               return function () {
                 if (typeof off === 'function') off()
+                for (var at = 0; at < stops.length; at += 1) {
+                  try {
+                    if (typeof stops[at] === 'function') stops[at]()
+                  } catch (error) { /* A released slot needs no second release. */ }
+                }
               }
             }
             var release
