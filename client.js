@@ -47,6 +47,16 @@ window.__ModuleLoader__.load({
     var React = require('react')
     var h = React.createElement
 
+    // The drop report is painted outside the conversation column, which needs a
+    // portal. `react-dom` is part of the client runtime; when it is missing the
+    // report simply falls back to rendering in place.
+    var ReactDOM = null
+    try {
+      ReactDOM = require('react-dom')
+    } catch (error) {
+      ReactDOM = null
+    }
+
     var NS = 'dsh-deepseek-web'
     var DICT = 'dshDeepseekWeb'
     var BROWSER_KIND = 'browser'
@@ -98,6 +108,7 @@ window.__ModuleLoader__.load({
       errOpenFailed: '打开标签页失败；请确认右侧栏可用后重试。',
       errNoTranscript: '未能读取该会话内容；请确认侧栏网页版已登录，且该会话仍然存在。',
       errNoInput: '当前会话没有可插入引用的输入框，请先进入一个会话。',
+      errNoAddress: '拖入的内容里没有可识别的会话地址。',
       quoteDetail: '来自侧栏 DeepSeek 网页版',
       dropHint: '松开即可把这个会话引用到当前输入框',
       quoted: '已把该会话作为引用插入输入框。',
@@ -159,6 +170,7 @@ window.__ModuleLoader__.load({
       errOpenFailed: 'Opening the tab failed; check that the right sidebar is available and retry.',
       errNoTranscript: 'The conversation could not be read. Make sure the embedded web app is signed in and the conversation still exists.',
       errNoInput: 'This session has no input to quote into; open a session first.',
+      errNoAddress: 'The dropped content carries no recognisable conversation address.',
       quoteDetail: 'From the DeepSeek web app in the sidebar',
       dropHint: 'Release to quote this conversation into the current input',
       quoted: 'The conversation was quoted into the input.',
@@ -261,7 +273,18 @@ window.__ModuleLoader__.load({
       color: C.secondary, fontSize: '12px', lineHeight: '18px',
     }
     var HINT_LINE = { margin: '2px 0' }
-    var DROP_HINT = Object.assign({}, SECTION, { color: C.link })
+    // The drop report is an overlay, not a row: the composer dock sits in the
+    // conversation column, so anything that occupies space there pushes the
+    // composer around. It stays out of flow and only paints over the bottom.
+    var DROP_HINT = {
+      position: 'fixed', zIndex: 40, left: '50%', bottom: '96px',
+      transform: 'translateX(-50%)', boxSizing: 'border-box',
+      maxWidth: 'calc(100vw - 32px)', padding: '8px 12px',
+      border: '1px solid ' + C.border, borderRadius: '8px',
+      background: C.surface, boxShadow: '0 6px 18px rgba(0, 0, 0, 0.22)',
+      color: C.label, fontFamily: 'inherit', fontSize: '12px', lineHeight: '18px',
+      pointerEvents: 'none', margin: 0,
+    }
 
     // -------------------------------------------------------------- sidebar fit
     // The footer action slot supplies `{ wide }`: a call-to-action row at full
@@ -563,17 +586,42 @@ window.__ModuleLoader__.load({
       var id = JSON.stringify(String(sessionId))
       return '(function(){' +
         'var id=' + id + ';' +
-        'var token="";try{token=window.localStorage.getItem("userToken")||""}catch(error){}' +
-        'var headers={};if(token)headers.Authorization="Bearer "+token;' +
-        'var url="/api/v0/chat/history_messages?chat_session_id="+encodeURIComponent(id)+"&cache_version=null&cache_reset_at=null";' +
-        'return fetch(url,{credentials:"include",headers:headers}).then(function(response){' +
-        'if(!response.ok)return {ok:false,reason:"http "+response.status};' +
-        'return response.json()}).then(function(json){' +
-        'var body=json&&json.data;var code=body&&body.biz_code;' +
+        // The site keeps its token in localStorage as `{value, __version}`, not
+        // as a bare string, so the wrapped value has to be unwrapped first.
+        'var token="";' +
+        'try{' +
+        'var raw=window.localStorage.getItem("userToken");' +
+        'if(raw){var parsed=JSON.parse(raw);' +
+        'token=parsed&&typeof parsed==="object"&&"value"in parsed?String(parsed.value||""):String(raw)}' +
+        '}catch(error){}' +
+        // The site also stamps every request with its client identity; without
+        // these the API answers 4xx before it ever looks at the credentials.
+        'var base={"x-client-bundle-id":"com.deepseek.chat","x-client-platform":"web",' +
+        '"x-client-version":"2.8.0","x-client-locale":(navigator.language||"en")};' +
+        'try{base["x-client-timezone-offset"]=String(-new Date().getTimezoneOffset())}catch(error){}' +
+        // Cache hints are optional: the site sends them only when it already has
+        // a cached copy, and sending a literal "null" makes the request invalid.
+        'var url="/api/v0/chat/history_messages?chat_session_id="+encodeURIComponent(id);' +
+        'function ask(withToken){' +
+        'var headers={};for(var key in base)headers[key]=base[key];' +
+        'if(withToken&&token)headers.Authorization="Bearer "+token;' +
+        'return fetch(url,{credentials:"include",headers:headers})' +
+        '}' +
+        // A rejected bearer token is worse than none: the cookie already proves
+        // the session, so a 4xx is retried once without the header.
+        'function attempt(response){' +
+        'if((response.status===401||response.status===403)&&token)return ask(false);' +
+        'return response}' +
+        'return ask(true).then(attempt).then(function(response){' +
+        'if(!response.ok)return {ok:false,reason:"http "+response.status+(token?"":" (no token)")};' +
+        'return response.text().then(function(body){' +
+        'var json=null;try{json=JSON.parse(body)}catch(error){' +
+        'return {ok:false,reason:"not json: "+body.slice(0,120)}}' +
+        'var data=json&&json.data;var code=data&&data.biz_code;' +
         'if(code&&code!==0)return {ok:false,reason:"biz_code "+code};' +
-        'var data=body&&body.biz_data;if(!data)return {ok:false,reason:"no data"};' +
-        'var title=String((data.chat_session&&data.chat_session.title)||"");' +
-        'var messages=Array.isArray(data.chat_messages)?data.chat_messages:[];' +
+        'var payload=data&&data.biz_data;if(!payload)return {ok:false,reason:"no data"};' +
+        'var title=String((payload.chat_session&&payload.chat_session.title)||"");' +
+        'var messages=Array.isArray(payload.chat_messages)?payload.chat_messages:[];' +
         'var lines=[];' +
         'for(var i=0;i<messages.length;i+=1){' +
         'var message=messages[i];var fragments=Array.isArray(message.fragments)?message.fragments:[];' +
@@ -582,7 +630,8 @@ window.__ModuleLoader__.load({
         'var who=kind==="REQUEST"?"用户":(kind==="RESPONSE"||kind==="TEMPLATE_RESPONSE"?"助手":"");' +
         'if(!who)continue;var content=String(fragment.content||"").trim();if(!content)continue;' +
         'lines.push("**"+who+"**："+content)}}' +
-        'return {ok:true,title:title,text:lines.join("\\n\\n")}' +
+        'return {ok:true,title:title,text:lines.join("\\n\\n"),count:messages.length}' +
+        '})' +
         '}).catch(function(error){return {ok:false,reason:String((error&&error.message)||error)}})' +
         '})()'
     }
@@ -623,54 +672,85 @@ window.__ModuleLoader__.load({
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null
       var nodes
       try { nodes = document.querySelectorAll(WEBVIEW_SELECTOR) } catch (error) { return null }
+      if (nodes.length === 0) return null
       var wanted = hostOf(settings.url)
-      var found = null
+      var loaded = null
+      var blank = null
       for (var index = 0; index < nodes.length; index += 1) {
         var node = nodes[index]
         var current = ''
         try { current = typeof node.getURL === 'function' ? String(node.getURL() || '') : '' } catch (error) { current = '' }
-        if (current === '') continue
+        // Before the guest commits a navigation it reports about:blank, so those
+        // nodes are only a fallback: a guest that already shows the site wins.
+        if (current === '') {
+          if (blank === null) blank = node
+          continue
+        }
         if (wanted !== '' && hostOf(current) === wanted) return node
-        if (found === null) found = node
+        if (loaded === null) loaded = node
       }
-      return found
+      return loaded !== null ? loaded : blank
+    }
+
+    /** The message of a thrown value, for reporting a concrete failure reason. */
+    function messageOf(error) {
+      if (error && typeof error.message === 'string' && error.message !== '') return error.message
+      return String(error || 'unknown error')
+    }
+
+    /** The type list a drop carried, for reporting what actually arrived. */
+    function describedTypes(transfer) {
+      if (!transfer) return 'no data transfer'
+      var types = []
+      try { types = Array.prototype.slice.call(transfer.types || []) } catch (error) { types = [] }
+      return types.length === 0 ? 'no types' : types.join(', ')
     }
 
     /**
      * Read the dropped conversation and quote it into the current input.
-     * Returns a promise of an outcome code so the caller can report it.
+     * Resolves to `{ status, detail }` so the caller can report what happened:
+     * the detail is the concrete reason a read failed, not a generic sentence.
      */
     function quoteDropped(sessionId, inputActions, t) {
       if (!inputActions || typeof inputActions.insertQuote !== 'function') {
-        return Promise.resolve('no-input')
+        return Promise.resolve({ status: 'no-input', detail: 'no input actions' })
       }
       var page = webAppGuest()
-      if (page === null || typeof page.executeJavaScript !== 'function') {
-        return Promise.resolve('no-transcript')
+      if (page === null) {
+        return Promise.resolve({ status: 'no-transcript', detail: 'no web view' })
+      }
+      if (typeof page.executeJavaScript !== 'function') {
+        return Promise.resolve({ status: 'no-transcript', detail: 'no executeJavaScript' })
       }
       var outcome
       try {
         outcome = page.executeJavaScript(transcriptScript(sessionId), true)
       } catch (error) {
-        return Promise.resolve('no-transcript')
+        return Promise.resolve({ status: 'no-transcript', detail: 'script threw: ' + messageOf(error) })
       }
-      if (!outcome || typeof outcome.then !== 'function') return Promise.resolve('no-transcript')
+      if (!outcome || typeof outcome.then !== 'function') {
+        return Promise.resolve({ status: 'no-transcript', detail: 'no promise from web view' })
+      }
       return outcome.then(function (result) {
         var payload = result
         if (typeof payload === 'string') {
           try { payload = JSON.parse(payload) } catch (error) { payload = null }
         }
-        if (!payload || payload.ok !== true) return 'no-transcript'
+        if (!payload) return { status: 'no-transcript', detail: 'unparsable result' }
+        if (payload.ok !== true) {
+          return { status: 'no-transcript', detail: String(payload.reason || 'unknown') }
+        }
         var text = String(payload.text || '').trim()
-        if (text === '') return 'empty-conversation'
+        if (text === '') return { status: 'empty-conversation', detail: 'no messages' }
         if (text.length > QUOTE_MAX_CHARS) text = text.slice(0, QUOTE_MAX_CHARS) + '\n…'
         var title = String(payload.title || '').trim()
         var summary = { label: t('quoteDetail') }
         if (title !== '') summary.title = title
         var accepted = inputActions.insertQuote(text, summary)
-        return accepted === false ? 'no-input' : 'quoted'
-      }, function () {
-        return 'no-transcript'
+        if (accepted === false) return { status: 'no-input', detail: 'insertQuote refused' }
+        return { status: 'quoted', detail: '' }
+      }, function (error) {
+        return { status: 'no-transcript', detail: 'read failed: ' + messageOf(error) }
       })
     }
 
@@ -679,11 +759,6 @@ window.__ModuleLoader__.load({
     function createController(ctx) {
       function service() {
         return ctx.sidebarRight || null
-      }
-
-      function messageOf(error) {
-        if (error && typeof error.message === 'string') return error.message
-        return String(error || 'unknown error')
       }
 
       function classify(error) {
@@ -826,16 +901,20 @@ window.__ModuleLoader__.load({
       if (droppedSessionId(transfer) !== '') return true
       if (!transfer || typeof transfer.getData !== 'function') return false
       // During dragover most engines refuse getData, so the type list is the only
-      // signal left. A link drag lists `text/uri-list`; a drag of selected text
-      // does not, and that one has to keep working as it always did.
+      // signal left. Whether the payload really is a conversation is decided on
+      // drop; until then any text-carrying drag is treated as a candidate. A drag
+      // of files lists none of these types and is left to the composer.
       var types = []
       try { types = Array.prototype.slice.call(transfer.types || []) } catch (error) { return false }
-      return types.indexOf('text/uri-list') !== -1
+      return types.indexOf('text/uri-list') !== -1 ||
+        types.indexOf('text/plain') !== -1 ||
+        types.indexOf('text/html') !== -1
     }
 
     /**
      * Session-scoped listener that turns a dropped conversation link into a
-     * quote in this input. Renders a line only while a candidate is dragged in.
+     * quote in this input. The report is painted as a fixed overlay so it never
+     * takes part in the composer's layout.
      */
     function DropTarget(props) {
       var t = props.t
@@ -857,7 +936,7 @@ window.__ModuleLoader__.load({
         var reportTimer = null
 
         // The report is a one-line answer to a finished drag, not a status that
-        // should stay: it clears itself so the composer keeps its usual shape.
+        // should stay: it clears itself so nothing is left behind.
         function report(text) {
           setNote(text)
           if (reportTimer !== null) clearTimeout(reportTimer)
@@ -895,17 +974,30 @@ window.__ModuleLoader__.load({
 
         function onDrop(event) {
           var sessionId = event.dataTransfer ? droppedSessionId(event.dataTransfer) : ''
+          var candidate = hinted
           depth = 0
           setHinted(false)
-          if (sessionId === '') return
+          if (sessionId === '') {
+            // A drag that announced itself as a conversation but carries no
+            // address is reported: staying silent would look like a dead button.
+            if (candidate) {
+              event.preventDefault()
+              event.stopPropagation()
+              report(t('errNoAddress') + ' (' + describedTypes(event.dataTransfer) + ')')
+            }
+            return
+          }
           event.preventDefault()
           event.stopPropagation()
           quoteDropped(sessionId, inputActions, t).then(function (outcome) {
-            if (outcome === 'quoted') report(t('quoted'))
-            else if (outcome === 'no-input') report(t('errNoInput'))
-            else if (outcome === 'empty-conversation') report(t('emptyConversation'))
-            else report(t('errNoTranscript'))
-          }, function () { report(t('errNoTranscript')) })
+            if (outcome.status === 'quoted') { report(t('quoted')); return }
+            var head = outcome.status === 'no-input'
+              ? t('errNoInput')
+              : outcome.status === 'empty-conversation' ? t('emptyConversation') : t('errNoTranscript')
+            // The reason is part of the report: without it the only thing left
+            // is a sentence that says nothing about what actually failed.
+            report(outcome.detail ? head + ' (' + outcome.detail + ')' : head)
+          }, function (error) { report(t('errNoTranscript') + ' (' + messageOf(error) + ')') })
         }
 
         document.addEventListener('dragenter', onDragEnter, true)
@@ -925,13 +1017,18 @@ window.__ModuleLoader__.load({
       }, [inputActions, t])
 
       if (!hinted && note === '') return null
-      return h(
-        'div',
-        { style: SECTION, 'data-dsh-deepseek-web-drop': 'true' },
-        hinted
-          ? h('p', { style: HINT_LINE }, t('dropHint'))
-          : h('p', { style: HINT_LINE }, note),
+      var line = h(
+        'p',
+        { style: DROP_HINT, 'data-dsh-deepseek-web-drop': 'true', role: 'status' },
+        hinted ? t('dropHint') : note,
       )
+      // The composer dock is inside the conversation column, so the hint is
+      // portalled to the document body to stay out of that layout entirely.
+      if (ReactDOM && typeof ReactDOM.createPortal === 'function' &&
+        typeof document !== 'undefined' && document.body) {
+        return ReactDOM.createPortal(line, document.body)
+      }
+      return line
     }
 
     function Panel(props) {

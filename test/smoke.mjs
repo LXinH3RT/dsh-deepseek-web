@@ -100,6 +100,14 @@ check('client fetches the transcript inside the embedded page',
   /history_messages/.test(client) && /chat_session_id/.test(client))
 check('client clears the drop report on its own',
   /NOTE_TIMEOUT_MS/.test(client) && /function report\(text\)/.test(client))
+check('client unwraps the site token before reading a transcript',
+  /__version/.test(client) && /parsed\.value/.test(client))
+check('client stamps the site client identity on the transcript request',
+  /x-client-platform/.test(client) && /x-client-version/.test(client))
+check('client reports the concrete reason a read failed',
+  /status: 'no-transcript', detail:/.test(client) && /outcome\.detail/.test(client))
+check('client keeps the drop report out of the composer flow',
+  /position: 'fixed'/.test(client) && /createPortal/.test(client))
 check('client keeps the sidebar foot as the only entry',
   /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
 check('client anchors the panel to the trigger',
