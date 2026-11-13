@@ -7,24 +7,33 @@
 // This plugin renders no page of its own. It owns one action at the sidebar foot
 // (`sidebar.footer.action`) whose button opens the shipped right-Sidebar Browser
 // tab (`@deepseek-ai/dsh-client-ui-sidebar-browser`) at a configured HTTPS
-// address. That keeps the host's theme, toolbar, navigation history and keyboard
-// habits, and leaves the web app's own conversation flows (new chat, typing,
-// streaming replies, resuming) entirely to the web app.
+// address. The button *is* the action: one click opens (or reveals) the page, with
+// no intermediate menu. A panel appears only when there is something to say — the
+// first-run environment note, or a failure with its checklist.
 //
-// Verified against the implementation shipped in DSH 0.2.2-rc.2:
+// Verified against the implementation shipped in DSH 0.2.2-rc.3:
 //   - `ctx.slots.inject('sidebar.footer.action', ...)` renders inside the
 //     sidebar's `footArea`, above Settings, in both the wide and the rail width.
 //     The owner supplies `{ wide }` as its only runtime prop.
 //   - The sidebar clips overflow, so the popup is `position: fixed` and anchored
 //     to the measured trigger rectangle (the same technique the shipped Cordis
 //     panel uses).
-//   - `ctx.sidebarRight.openTab('browser', { params: { url } })` opens a
-//     Browser tab; the URL goes through the same validation as the address bar.
-//   - `ctx.sidebarRight.openTabs.getSnapshot()` yields
-//     `{ sessionId, tabId, kind, contentId }[]` for every open tab.
-//   - `ctx.sidebarRight.focus(tabId)` reveals an existing tab.
-//   - Browser declares `multiple: true`, so every `openTab` would otherwise
-//     create a fresh tab; reusing an existing one is what preserves a session.
+//   - `ctx.sidebarRight.openTab('browser', { params: { url } })` opens a Browser
+//     tab. Its planner expands the sidebar (`planSetExpanded(state, true)`), so a
+//     collapsed sidebar is not a failure mode for this path.
+//   - `ctx.sidebarRight.mounted.getSnapshot()` is the on-screen session id;
+//     `tabsIn(sessionId)` (a service method, absent from the interface type but
+//     present at runtime) lists that session's tabs only. `openTabs` is the
+//     cross-session inventory restored from storage, so it is never used to judge
+//     what the current session shows.
+//   - `ctx.sidebarRight.focus(tabId)` silently returns when the tab is not in the
+//     mounted layout and never expands a collapsed sidebar, so the reuse path
+//     expands first and focuses afterwards.
+//   - The guest page is a `<webview data-sidebar-browser-frame="webview">` in this
+//     same renderer; its element-level `executeJavaScript` is available to the
+//     embedder (the host's attach policy constrains the guest, not the embedder).
+//     That is the only supported way to type into the page, so credential
+//     autofill uses it and degrades to a no-op elsewhere.
 //   - `ctx.shortcuts.register` and `ctx.configForms.get` are optional services
 //     requested at runtime with `ctx.inject`.
 
@@ -43,73 +52,65 @@ window.__ModuleLoader__.load({
     var BROWSER_KIND = 'browser'
     var FOOTER_SLOT = 'sidebar.footer.action'
     var DEFAULT_URL = 'https://chat.deepseek.com'
-    var VERIFY_DELAY_MS = 2500
     var NOTICE_KEY = 'dsh-deepseek-web.environment-notice-dismissed'
+    var WEBVIEW_SELECTOR = 'webview[data-sidebar-browser-frame="webview"]'
+    var FILL_ATTEMPTS = 12
+    var FILL_INTERVAL_MS = 800
 
     // ------------------------------------------------------------------ copy
 
     var zh = {
       trigger: 'DeepSeek 网页版',
       panelTitle: 'DeepSeek 网页版',
-      open: '打开',
-      newTab: '新建标签',
-      help: '页面异常',
+      close: '关闭',
       opening: '正在打开…',
       retry: '重试',
       diagnostics: '检查项',
-      close: '关闭',
       diagnosticsTitle: '加载失败或状态异常时，按顺序检查',
-      buttonHint: '在右侧栏打开或回到 DeepSeek 网页版',
+      buttonHint: '在内置浏览器打开 DeepSeek 网页版',
       shortcutLabel: '打开 DeepSeek 网页版',
       shortcutDisabled: '该快捷键已在插件配置中关闭。',
       noticeTitle: '环境提示',
-      noticeBody: 'DeepSeek 网页版运行在内嵌浏览器中，站点可能提示「环境异常」并建议使用官方客户端。插件只在本机打开该页面，不读取、转发或代理对话内容。遇到该提示时，可在 Browser 工具栏选择「在系统浏览器打开」，或直接使用官方客户端。',
+      noticeBody: 'DeepSeek 网页版运行在内嵌浏览器中，站点可能提示「环境异常」并建议使用官方客户端。插件只在本机打开该页面，不读取、转发或代理对话内容。若在插件配置中填写了账号与密码，插件会在本机自动填入登录页；凭据以明文保存在插件配置文件中。遇到环境提示时，可在 Browser 工具栏选择「在系统浏览器打开」，或直接使用官方客户端。',
       noticeDismiss: '不再提示',
       errNoService: '右侧栏服务未就绪，无法打开标签页。',
       errNoBrowser: '内置 Browser 标签页未启用；请在「插件」中启用 dsh-client-ui-sidebar-browser，Web 配置还需在 profile patch 中设置 disabled: false。',
       errNoSession: '当前没有前台会话，右侧栏无法放置标签页；进入一个会话后重试。',
       errBadUrl: '网页地址无效，仅支持不含账号密码的 http/https 地址。',
       errOpenFailed: '打开标签页失败；请确认右侧栏可用后重试。',
-      errNotAppeared: '标签页未能创建；右侧栏可能处于折叠或不可用状态。',
-      errPageProblem: '页面空白、无法登录或无响应时，按下列检查项处理。',
       errGeneric: '发生未预期的错误，请重试。',
-      diag1: '点 Browser 工具栏的「重新载入」；或点上方「新建标签」重新打开该地址。',
-      diag2: '若要求重新登录：网页版登录态保存在进程内会话分区，DSH 重启后失效，需要重新登录。',
+      diag1: '再点一次侧栏底部图标；打开的标签页会被复用，不会堆叠。',
+      diag2: '若要求重新登录：网页版登录态保存在进程内会话分区，DSH 重启后失效，需要重新登录——填写插件配置的账号密码可自动完成这一步。',
       diag3: '若站点拒绝嵌入、需要下载或弹窗：点 Browser 工具栏的「在系统浏览器打开」。',
       diag4: '确认网络与系统代理可达；内置 Browser 是真实浏览器导航，不走应用内的 web 工具。',
-      diag5: '对话、输入与回复由网页版自身承载；插件不读取、注入或转发网页内容。',
+      diag5: '对话、输入与回复由网页版自身承载；插件不读取、注入或转发网页内容（自动填入凭据除外）。',
     }
 
     var en = {
       trigger: 'DeepSeek Web',
       panelTitle: 'DeepSeek Web',
-      open: 'Open',
-      newTab: 'New tab',
-      help: 'Page issue',
+      close: 'Close',
       opening: 'Opening…',
       retry: 'Retry',
       diagnostics: 'Checks',
-      close: 'Close',
       diagnosticsTitle: 'When loading fails or the tab looks wrong, check in order',
-      buttonHint: 'Open or return to the DeepSeek web app in the right sidebar',
+      buttonHint: 'Open the DeepSeek web app in the built-in browser',
       shortcutLabel: 'Open DeepSeek Web',
       shortcutDisabled: 'This shortcut is disabled in the plugin settings.',
       noticeTitle: 'Environment note',
-      noticeBody: 'The DeepSeek web app runs inside an embedded browser, and the site may report an unsupported environment and suggest its official client. This plugin only opens the page locally; it never reads, relays or proxies a conversation. If that notice appears, use "Open in system browser" in the Browser toolbar, or use the official client directly.',
+      noticeBody: 'The DeepSeek web app runs inside an embedded browser, and the site may report an unsupported environment and suggest its official client. This plugin only opens the page locally; it never reads, relays or proxies a conversation. If an account and password are set in the plugin configuration, the plugin types them into the local sign-in form; that password is stored in plain text in the plugin configuration file. If the environment notice appears, use "Open in system browser" in the Browser toolbar, or use the official client directly.',
       noticeDismiss: "Don't show again",
       errNoService: 'The right sidebar service is unavailable, so no tab can be opened.',
       errNoBrowser: 'The built-in Browser tab is disabled. Enable dsh-client-ui-sidebar-browser in Plugins; Web profiles also need disabled: false in the profile patch.',
       errNoSession: 'No session is on screen, so the sidebar cannot place a tab. Enter a session and retry.',
       errBadUrl: 'Invalid address. Only http/https URLs without embedded credentials are accepted.',
       errOpenFailed: 'Opening the tab failed; check that the right sidebar is available and retry.',
-      errNotAppeared: 'The tab was not created; the sidebar may be collapsed or unavailable.',
-      errPageProblem: 'For a blank page, a login loop or no response, follow the checks below.',
       errGeneric: 'Unexpected error; please retry.',
-      diag1: 'Use Reload in the Browser toolbar, or press "New tab" above to reopen the address.',
-      diag2: 'If asked to sign in again: web login state lives in a process-local partition and is lost when DSH restarts.',
+      diag1: 'Click the sidebar foot icon again; the open tab is reused instead of stacking new ones.',
+      diag2: 'If asked to sign in again: web login state lives in a process-local partition and is lost when DSH restarts. Filling in the configured credentials automates that step.',
       diag3: 'If the site refuses embedding or needs downloads/popups, use "Open in system browser" in the Browser toolbar.',
       diag4: 'Check network and system proxy reachability. The built-in Browser performs real navigation, not an in-app web fetch.',
-      diag5: 'Conversations, input and replies belong to the web app; this plugin never reads, injects or relays page content.',
+      diag5: 'Conversations, input and replies belong to the web app; this plugin never reads, injects or relays page content (except typing the configured credentials).',
     }
 
     /** Bind the dictionary through the locale service, with a language guess as fallback. */
@@ -160,7 +161,6 @@ window.__ModuleLoader__.load({
       lineHeight: '18px',
       cursor: 'pointer',
     }
-    var BTN_PRIMARY = Object.assign({}, BTN, { borderColor: C.link, color: C.link })
     var BTN_QUIET = Object.assign({}, BTN, {
       borderColor: 'transparent', color: C.tertiary, padding: '3px 6px',
     })
@@ -184,7 +184,7 @@ window.__ModuleLoader__.load({
     var CSS_TEXT = [
       '[data-dsh-deepseek-web-trigger]{transition:background-color .12s ease}',
       '@media (hover:hover){[data-dsh-deepseek-web-trigger]:hover{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}}',
-      '[data-dsh-deepseek-web-trigger][data-open]{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}',
+      '[data-dsh-deepseek-web-trigger][data-busy]{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}',
       '[data-dsh-deepseek-web-trigger]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary, currentColor);outline-offset:2px}',
       '[data-dsh-deepseek-web-panel] button:hover{background:' + 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.12))' + '}',
       '[data-dsh-deepseek-web-panel] button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary, currentColor);outline-offset:2px}',
@@ -260,6 +260,9 @@ window.__ModuleLoader__.load({
       url: DEFAULT_URL,
       reuseExistingTab: true,
       registerShortcut: true,
+      autoFill: true,
+      account: '',
+      password: '',
     }
 
     /** Merge a Host configForms snapshot into the live settings. */
@@ -271,14 +274,21 @@ window.__ModuleLoader__.load({
       if (typeof reuse === 'boolean') settings.reuseExistingTab = reuse
       var shortcut = unbox(value.registerShortcut)
       if (typeof shortcut === 'boolean') settings.registerShortcut = shortcut
+      var fill = unbox(value.autoFill)
+      if (typeof fill === 'boolean') settings.autoFill = fill
+      var account = unbox(value.account)
+      if (typeof account === 'string') settings.account = account.trim()
+      var password = unbox(value.password)
+      if (typeof password === 'string') settings.password = password
     }
 
     // ---------------------------------------------------------------- notice
-    // The first run explains the embedded-environment caveat once. The flag
-    // lives in localStorage so it survives DSH restarts; without storage the
-    // notice stays hidden rather than reappearing on every launch.
+    // The first run explains the embedded-environment caveat once, when the
+    // button is first used. The flag lives in localStorage so it survives DSH
+    // restarts; without storage the notice stays hidden rather than reappearing
+    // on every launch.
 
-    var notice = { pending: false, autoOpened: false }
+    var notice = { pending: false }
 
     function storageOf() {
       try {
@@ -301,11 +311,9 @@ window.__ModuleLoader__.load({
     function dismissNotice() {
       notice.pending = false
       var store = storageOf()
-      if (store === null) {
-        setState({})
-        return
+      if (store !== null) {
+        try { store.setItem(NOTICE_KEY, '1') } catch (error) { /* Private mode keeps it per run. */ }
       }
-      try { store.setItem(NOTICE_KEY, '1') } catch (error) { /* Private mode keeps it per run. */ }
       setState({})
     }
 
@@ -378,21 +386,91 @@ window.__ModuleLoader__.load({
       timers.clear()
     }
 
+    // -------------------------------------------------------------- autofill
+    // The guest page is a <webview> in this renderer, so the embedder side can
+    // run a script inside it. The script only looks at the visible sign-in form:
+    // no password field means the page is already signed in (or not loaded yet),
+    // and it then changes nothing.
+
+    function hostOf(raw) {
+      try { return new URL(raw).hostname } catch (error) { return '' }
+    }
+
+    function guestPages(host) {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return []
+      var nodes
+      try { nodes = document.querySelectorAll(WEBVIEW_SELECTOR) } catch (error) { return [] }
+      var pages = []
+      for (var i = 0; i < nodes.length; i += 1) {
+        var node = nodes[i]
+        var current = ''
+        try { current = typeof node.getURL === 'function' ? String(node.getURL() || '') : '' } catch (error) { current = '' }
+        if (current === '' || hostOf(current) !== host) continue
+        pages.push(node)
+      }
+      return pages
+    }
+
+    /** In-page script: fill the visible sign-in form and submit it once. */
+    function fillScript(account, secret) {
+      var payload = JSON.stringify({ account: account, secret: secret })
+      return '(function(){var data=' + payload + ';try{' +
+        'var visible=function(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0};' +
+        'var all=Array.prototype.slice.call(document.querySelectorAll("input"));' +
+        'var inputs=all.filter(function(el){return el.type!=="hidden"&&!el.disabled&&!el.readOnly&&visible(el)});' +
+        'var password=null,i;for(i=0;i<inputs.length;i++){if(inputs[i].type==="password"){password=inputs[i];break}}' +
+        'if(!password)return "no-password-field";' +
+        'var accountField=null;for(i=0;i<inputs.length;i++){var el=inputs[i];if(el===password)continue;var type=(el.type||"").toLowerCase();if(type==="text"||type==="tel"||type==="email"||type===""){accountField=el;break}}' +
+        'var setValue=function(el,value){var view=el.ownerDocument.defaultView||window;var proto=view.HTMLInputElement.prototype;var desc=Object.getOwnPropertyDescriptor(proto,"value");if(desc&&typeof desc.set==="function"){desc.set.call(el,value)}else{el.value=value}el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}))};' +
+        'if(accountField&&data.account)setValue(accountField,data.account);' +
+        'setValue(password,data.secret);' +
+        'var buttons=Array.prototype.slice.call(document.querySelectorAll("button,[role=button]"));' +
+        'for(i=0;i<buttons.length;i++){var b=buttons[i];var label=String(b.innerText||b.textContent||"").trim();if(!label||!visible(b))continue;if(/^(登录|登 录|log ?in|sign ?in)$/i.test(label)){setTimeout(function(){b.click()},400);return "submitted"}}' +
+        'return "filled"' +
+        '}catch(error){return "error:"+((error&&error.message)||"unknown")}})()'
+    }
+
+    /**
+     * Type the configured credentials into the page once it is loaded.
+     * Stops on the first filled form; every step is bounded and cancellable.
+     */
+    function scheduleFill(host) {
+      if (!settings.autoFill || settings.password === '') return
+      var remaining = FILL_ATTEMPTS
+      function attempt() {
+        if (remaining <= 0) return
+        remaining -= 1
+        var pages = guestPages(host)
+        if (pages.length === 0) {
+          later(attempt, FILL_INTERVAL_MS)
+          return
+        }
+        var page = pages[pages.length - 1]
+        if (typeof page.executeJavaScript !== 'function') return
+        var outcome = null
+        try {
+          outcome = page.executeJavaScript(fillScript(settings.account, settings.password), true)
+        } catch (error) {
+          return
+        }
+        if (!outcome || typeof outcome.then !== 'function') return
+        outcome.then(function (result) {
+          var text = String(result || '')
+          if (text === 'filled' || text === 'submitted') return
+          if (text.indexOf('error:') === 0) return
+          later(attempt, FILL_INTERVAL_MS)
+        }, function () {
+          later(attempt, FILL_INTERVAL_MS)
+        })
+      }
+      later(attempt, FILL_INTERVAL_MS)
+    }
+
     // ------------------------------------------------------------ controller
 
     function createController(ctx) {
-      function browserTabs() {
-        try {
-          var inventory = ctx.sidebarRight && ctx.sidebarRight.openTabs
-          var list = inventory && typeof inventory.getSnapshot === 'function'
-            ? inventory.getSnapshot()
-            : []
-          return (Array.isArray(list) ? list : []).filter(function (tab) {
-            return tab && tab.kind === BROWSER_KIND
-          })
-        } catch (error) {
-          return []
-        }
+      function service() {
+        return ctx.sidebarRight || null
       }
 
       function messageOf(error) {
@@ -407,43 +485,63 @@ window.__ModuleLoader__.load({
         return 'open-failed'
       }
 
-      function inventoryAvailable() {
+      function mountedSession() {
+        var target = service()
         try {
-          var inventory = ctx.sidebarRight && ctx.sidebarRight.openTabs
-          return !!(inventory && typeof inventory.getSnapshot === 'function')
-        } catch (error) {
-          return false
-        }
-      }
-
-      function scheduleVerification(before, known) {
-        // Without a live inventory the outcome cannot be judged. Report success
-        // rather than a false failure for a tab that may have opened already.
-        if (!known) {
-          setState({ phase: 'active', code: null, detail: null })
-          return
-        }
-        later(function () {
-          if (state.phase !== 'opening') return
-          var after = browserTabs()
-          var appeared = after.length > before.length || after.some(function (tab) {
-            return before.indexOf(tab.tabId) === -1
-          })
-          setState(appeared
-            ? { phase: 'active', code: null, detail: null }
-            : { phase: 'error', code: 'not-appeared', detail: null })
-        }, VERIFY_DELAY_MS)
+          var snap = target && target.mounted
+          if (snap && typeof snap.getSnapshot === 'function') return snap.getSnapshot()
+        } catch (error) { /* No mounted session is a valid state. */ }
+        return undefined
       }
 
       /**
-       * Open the web app. `forceNew` bypasses tab reuse (used by "New tab" and
-       * Retry, which must produce a fresh navigation rather than reveal a stale
-       * page). Reusing an existing Browser tab is what keeps a conversation
-       * going: Desktop declares `keepMounted`, so its DOM and page state survive
-       * tab switches, sidebar collapse and session changes.
+       * Browser tabs of the on-screen session only. The cross-session inventory
+       * restored from storage would report tabs this session cannot show, and
+       * with no session on screen nothing is showable at all.
        */
-      function open(forceNew) {
-        if (!ctx.sidebarRight || typeof ctx.sidebarRight.openTab !== 'function') {
+      function sessionTabs(sessionId) {
+        var target = service()
+        if (!target || sessionId === undefined) return []
+        try {
+          if (typeof target.tabsIn === 'function') {
+            var own = target.tabsIn(sessionId)
+            if (Array.isArray(own)) {
+              return own.filter(function (tab) { return tab && tab.kind === BROWSER_KIND })
+            }
+          }
+        } catch (error) { /* Fall back to the inventory below. */ }
+        try {
+          var inventory = target.openTabs
+          var list = inventory && typeof inventory.getSnapshot === 'function' ? inventory.getSnapshot() : []
+          return (Array.isArray(list) ? list : []).filter(function (tab) {
+            return tab && tab.kind === BROWSER_KIND && tab.sessionId === sessionId
+          })
+        } catch (error) {
+          return []
+        }
+      }
+
+      /** `focus` never expands a collapsed sidebar, so expand before focusing. */
+      function reveal(tabId) {
+        var target = service()
+        var expanded = true
+        try {
+          if (typeof target.isExpanded === 'function') expanded = target.isExpanded() !== false
+        } catch (error) { expanded = true }
+        if (!expanded && typeof target.toggleExpanded === 'function') {
+          try { target.toggleExpanded() } catch (error) { /* The focus below still runs. */ }
+        }
+        if (typeof target.focus === 'function') target.focus(tabId)
+      }
+
+      /**
+       * Open the web app. One click, one outcome: reveal the session's existing
+       * Browser tab, or place a new one. `openTab` expands the sidebar itself and
+       * throws when nothing can be placed, so failures are reported from there.
+       */
+      function open() {
+        var target = service()
+        if (!target || typeof target.openTab !== 'function') {
           setState({ phase: 'error', code: 'no-service', detail: null })
           return
         }
@@ -452,35 +550,26 @@ window.__ModuleLoader__.load({
           setState({ phase: 'error', code: 'bad-url', detail: check.detail })
           return
         }
+        var sessionId = mountedSession()
+        var existing = settings.reuseExistingTab === false ? [] : sessionTabs(sessionId)
         setState({ phase: 'opening', code: null, detail: null, showDiagnostics: false })
-
-        var tabs = browserTabs()
-        var before = tabs.map(function (tab) { return tab.tabId })
-        var known = inventoryAvailable()
-
         try {
-          if (!forceNew && settings.reuseExistingTab && tabs.length > 0) {
-            var target = tabs[tabs.length - 1]
-            if (typeof ctx.sidebarRight.focus === 'function') {
-              ctx.sidebarRight.focus(target.tabId)
-              setState({ phase: 'active', code: null, detail: null })
-              return
-            }
+          if (existing.length > 0) {
+            reveal(existing[existing.length - 1].tabId)
+          } else {
+            target.openTab(BROWSER_KIND, { params: { url: check.url } })
           }
-          ctx.sidebarRight.openTab(BROWSER_KIND, { params: { url: check.url } })
         } catch (error) {
           setState({ phase: 'error', code: classify(error), detail: messageOf(error) })
           return
         }
-        scheduleVerification(before, known)
+        setState({ phase: 'active', code: null, detail: null })
+        scheduleFill(hostOf(check.url))
       }
 
       return {
         open: open,
-        retry: function () { open(true) },
-        report: function () {
-          setState({ phase: 'error', code: 'page-problem', detail: null, showDiagnostics: true })
-        },
+        retry: open,
         toggleDiagnostics: function () {
           setState({ showDiagnostics: !state.showDiagnostics })
         },
@@ -495,8 +584,6 @@ window.__ModuleLoader__.load({
       if (s.code === 'no-session') return t('errNoSession')
       if (s.code === 'bad-url') return t('errBadUrl') + (s.detail ? ' [' + s.detail + ']' : '')
       if (s.code === 'open-failed') return t('errOpenFailed') + (s.detail ? ' [' + s.detail + ']' : '')
-      if (s.code === 'not-appeared') return t('errNotAppeared')
-      if (s.code === 'page-problem') return t('errPageProblem')
       return t('errGeneric')
     }
 
@@ -542,12 +629,10 @@ window.__ModuleLoader__.load({
         return subscribe(function (next) { setStatus(next) })
       }, [])
 
-      // Explain the embedded-environment caveat once, on the very first run.
+      // A failure is the one thing the panel must surface on its own.
       React.useEffect(function () {
-        if (!notice.pending || notice.autoOpened) return
-        notice.autoOpened = true
-        setOpen(true)
-      }, [])
+        if (status.phase === 'error') setOpen(true)
+      }, [status.phase])
 
       // The sidebar clips overflow, so the surface is fixed and hugs the
       // trigger through a measured offset instead of document flow.
@@ -558,7 +643,8 @@ window.__ModuleLoader__.load({
           if (!node || typeof node.getBoundingClientRect !== 'function') return
           var rect = node.getBoundingClientRect()
           var height = typeof window !== 'undefined' ? window.innerHeight : 0
-          var left = Math.max(8, Math.min(rect.left, (typeof window !== 'undefined' ? window.innerWidth : 0) - 368))
+          var width = typeof window !== 'undefined' ? window.innerWidth : 0
+          var left = Math.max(8, Math.min(rect.left, width - 368))
           setAnchor({ left: left, bottom: Math.max(8, height - rect.top + 8) })
         }
         place()
@@ -606,28 +692,17 @@ window.__ModuleLoader__.load({
           h('button', {
             key: 'dismiss', type: 'button',
             style: Object.assign({}, BTN_QUIET, { paddingLeft: 0 }),
-            onClick: function () { props.dismissNotice() },
+            onClick: function () {
+              props.dismissNotice()
+              if (status.phase !== 'error') setOpen(false)
+            },
           }, t('noticeDismiss')),
         ))
       }
 
-      body.push(h(
-        'div',
-        { key: 'actions', style: ROW },
-        h('button', {
-          type: 'button', style: BTN_PRIMARY, title: t('buttonHint'),
-          onClick: function () { props.open(false) },
-        }, t('open')),
-        h('button', {
-          type: 'button', style: BTN,
-          onClick: function () { props.open(true) },
-        }, t('newTab')),
-        h('button', {
-          type: 'button', style: BTN_QUIET,
-          onClick: function () { props.report() },
-        }, t('help')),
-        status.phase === 'opening' ? h('span', { key: 'opening', style: HINT }, t('opening')) : null,
-      ))
+      if (status.phase === 'opening') {
+        body.push(h('p', { key: 'opening', style: HINT }, t('opening')))
+      }
 
       if (status.phase === 'error') {
         body.push(h(
@@ -677,10 +752,12 @@ window.__ModuleLoader__.load({
             style: wide ? BADGE : BADGE_RAIL,
             title: t('buttonHint'),
             'aria-label': t('buttonHint'),
-            'aria-expanded': isOpen,
+            'aria-busy': status.phase === 'opening',
             'data-dsh-deepseek-web-trigger': '',
-            'data-open': isOpen ? '' : undefined,
-            onClick: function () { setOpen(!isOpen) },
+            'data-busy': status.phase === 'opening' ? '' : undefined,
+            onClick: function () {
+              if (props.activate()) setOpen(true)
+            },
           },
           h(Icon),
           wide ? h('span', { style: BADGE_LABEL }, t('trigger')) : null,
@@ -772,7 +849,7 @@ window.__ModuleLoader__.load({
                   if (settings.registerShortcut === false) {
                     return { status: 'blocked', reason: t('shortcutDisabled') }
                   }
-                  return { status: 'handled', run: function () { controller.open(false) } }
+                  return { status: 'handled', run: function () { controller.open() } }
                 },
               })
             }, 'dsh-deepseek-web: shortcut')
@@ -792,12 +869,15 @@ window.__ModuleLoader__.load({
             inject: function () {
               return {
                 t: t,
-                open: controller.open,
+                // The button is the action: it opens and reports whether the
+                // first-run note also has to be shown.
+                activate: function () {
+                  controller.open()
+                  return notice.pending
+                },
                 retry: controller.retry,
-                report: controller.report,
                 toggleDiagnostics: controller.toggleDiagnostics,
                 dismissNotice: dismissNotice,
-                notice: notice,
               }
             },
           }, Panel)

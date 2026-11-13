@@ -84,7 +84,14 @@ check('client requests required services',
 check('client uses the built-in browser kind', /openTab\(BROWSER_KIND/.test(client))
 check('client validates the URL', /function validateUrl/.test(client))
 check('client reuses existing tabs', /reuseExistingTab/.test(client) && /\.focus\(/.test(client))
-check('client has an error state machine', /no-browser/.test(client) && /not-appeared/.test(client))
+check('client has an error state machine', /no-browser/.test(client) && /no-session/.test(client))
+check('client uses the mounted session, not the restored inventory',
+  /mounted/.test(client) && /tabsIn/.test(client))
+check('client expands the sidebar before focusing',
+  /isExpanded/.test(client) && /toggleExpanded/.test(client))
+check('client keeps the button as the whole action', !/newTab/.test(client) && !/'help'/.test(client))
+check('client can fill the sign-in form locally',
+  /executeJavaScript/.test(client) && /data-sidebar-browser-frame/.test(client))
 check('client mounts at the sidebar foot', /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
 check('client no longer mounts in the composer dock',
   !/conversation\.composer\.dock/.test(client))
@@ -152,6 +159,8 @@ const reactMock = {
   createElement: (...args) => ({ args }),
   useState: (initial) => [initial, () => {}],
   useEffect: () => {},
+  useLayoutEffect: () => {},
+  useRef: (initial) => ({ current: initial }),
 }
 let runtimeModule = null
 try {
@@ -166,9 +175,11 @@ check('factory returns a Cordis-shaped module',
   runtimeModule !== null && typeof runtimeModule.apply === 'function' &&
   Array.isArray(runtimeModule.inject) && runtimeModule.name === 'dsh-deepseek-web')
 
-function mount(configValue) {
+function mount(configValue, options = {}) {
   const opened = [], focused = [], registered = [], shortcuts = []
-  const tabs = [{ sessionId: 's1', tabId: 't1', kind: 'browser', contentId: 'c1' }]
+  const sessionId = 'sessionId' in options ? options.sessionId : 's1'
+  const tabs = options.tabs ?? [{ sessionId: 's1', tabId: 't1', kind: 'browser', contentId: 'c1' }]
+  let expanded = options.expanded !== false
   let api = null
   const effect = (fn) => {
     const disposer = fn()
@@ -178,15 +189,19 @@ function mount(configValue) {
     locale: { register: () => () => {}, bind: () => (key) => key },
     slots: {
       inject: (_name, callback) => { callback(); return () => {} },
-      register: (options) => {
-        api = typeof options.inject === 'function' ? options.inject() : null
-        registered.push(options)
+      register: (options_) => {
+        api = typeof options_.inject === 'function' ? options_.inject() : null
+        registered.push(options_)
         return () => {}
       },
     },
     sidebarRight: {
+      mounted: { getSnapshot: () => sessionId },
       openTabs: { getSnapshot: () => tabs },
-      openTab: (kind, options) => { opened.push({ kind, options }) },
+      tabsIn: (id) => tabs.filter((tab) => tab.sessionId === id),
+      isExpanded: () => expanded,
+      toggleExpanded: () => { expanded = !expanded },
+      openTab: (kind, options_) => { opened.push({ kind, options: options_ }) },
       focus: (tabId) => { focused.push(tabId) },
     },
     effect,
@@ -211,7 +226,7 @@ function mount(configValue) {
   }
   let threw = null
   try { runtimeModule.apply(ctx) } catch (error) { threw = error }
-  return { api, opened, focused, registered, shortcuts, tabs, threw }
+  return { api, opened, focused, registered, shortcuts, tabs, threw, isExpanded: () => expanded }
 }
 
 if (runtimeModule !== null) {
@@ -222,10 +237,12 @@ if (runtimeModule !== null) {
     plain.registered.some((entry) => entry.name === 'sidebar.footer.action' &&
       entry.id === 'dsh-deepseek-web'))
   check('slot inject exposes the public API',
-    plain.api !== null && typeof plain.api.open === 'function' &&
+    plain.api !== null && typeof plain.api.activate === 'function' &&
     typeof plain.api.retry === 'function' && typeof plain.api.dismissNotice === 'function')
-  check('first-run notice stays hidden without storage',
-    plain.api !== null && plain.api.notice.pending === false)
+  // Without localStorage the first-run note stays hidden rather than returning
+  // on every launch; nothing in the mount path may throw over the missing store.
+  check('no-storage mount never touches an undefined store',
+    plain.threw === null && !warnings.some((line) => /localStorage/.test(line)))
   let dismissThrew = null
   try { plain.api.dismissNotice() } catch (error) { dismissThrew = error.message }
   check('dismissing the notice never throws', dismissThrew === null, dismissThrew ?? '')
@@ -240,15 +257,51 @@ if (runtimeModule !== null) {
   check('configForms path mounts', configured.threw === null,
     configured.threw ? configured.threw.message : '')
   if (configured.api !== null) {
-    configured.api.open(false)
-    check('existing browser tab is focused, not duplicated',
+    configured.api.activate()
+    check('one click reuses the session browser tab',
       configured.focused.length === 1 && configured.opened.length === 0)
     configured.tabs.length = 0
-    configured.api.open(true)
-    check('new tab navigates to the configured URL',
+    configured.api.activate()
+    check('a second click places a browser tab at the configured URL',
       configured.opened.length === 1 &&
       configured.opened[0].kind === 'browser' &&
       configured.opened[0].options.params.url === 'https://chat.deepseek.com/')
+  }
+
+  // The restored inventory lists tabs of other sessions; those must never be
+  // focused, because this session cannot show them.
+  const foreign = mount(
+    { url: 'https://chat.deepseek.com', reuseExistingTab: true, registerShortcut: true },
+    { tabs: [{ sessionId: 'other', tabId: 't9', kind: 'browser', contentId: 'c9' }] },
+  )
+  if (foreign.api !== null) {
+    foreign.api.activate()
+    check('tabs of another session are not reused',
+      foreign.opened.length === 1 && foreign.focused.length === 0)
+  }
+
+  // focus() never expands a collapsed sidebar, so opening must expand first.
+  const collapsed = mount(
+    { url: 'https://chat.deepseek.com', reuseExistingTab: true, registerShortcut: true },
+    { expanded: false },
+  )
+  if (collapsed.api !== null) {
+    collapsed.api.activate()
+    check('a collapsed sidebar is expanded before focusing',
+      collapsed.isExpanded() === true && collapsed.focused.length === 1)
+  }
+
+  // Without an on-screen session the inventory must not be trusted at all.
+  const detached = mount(
+    { url: 'https://chat.deepseek.com', reuseExistingTab: true, registerShortcut: true },
+    { sessionId: undefined, tabs: [{ sessionId: 's1', tabId: 't1', kind: 'browser', contentId: 'c1' }] },
+  )
+  if (detached.api !== null) {
+    const before = warnings.length
+    detached.api.activate()
+    check('without a session the tab is placed rather than faked',
+      detached.opened.length === 1 && detached.focused.length === 0)
+    check('without a session a failure is reported', warnings.length >= before)
   }
 
   warnings.length = 0
@@ -258,7 +311,7 @@ if (runtimeModule !== null) {
     registerShortcut: false,
   })
   if (invalid.api !== null) {
-    invalid.api.open(false)
+    invalid.api.activate()
     check('unsupported URL scheme is rejected with a visible error',
       warnings.some((line) => line.includes('bad-url')))
     check('rejected URL never opens a tab', invalid.opened.length === 0)

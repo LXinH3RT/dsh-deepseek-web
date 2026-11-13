@@ -40,6 +40,9 @@ export function buildConfig(builder) {
       url: builder.string().default('https://chat.deepseek.com').volatile(),
       reuseExistingTab: builder.boolean().default(true).volatile(),
       registerShortcut: builder.boolean().default(true).volatile(),
+      autoFill: builder.boolean().default(true).volatile(),
+      account: builder.string().default('').volatile(),
+      password: builder.string().default('').volatile(),
     })
   } catch {
     return undefined

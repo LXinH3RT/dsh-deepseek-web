@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Open the DeepSeek web app inside the native right-Sidebar Browser tab of DeepSeek Harness.",
   "private": true,
   "type": "module",
@@ -46,7 +46,7 @@
   },
   "engines": {
     "node": ">=22",
-    "dsh": ">=0.2.2-rc.2"
+    "dsh": ">=0.2.2-rc.3"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
