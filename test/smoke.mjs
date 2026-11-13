@@ -92,9 +92,16 @@ check('client expands the sidebar before focusing',
 check('client keeps the button as the whole action', !/newTab/.test(client) && !/'help'/.test(client))
 check('client can fill the sign-in form locally',
   /executeJavaScript/.test(client) && /data-sidebar-browser-frame/.test(client))
-check('client mounts at the sidebar foot', /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
-check('client no longer mounts in the composer dock',
-  !/conversation\.composer\.dock/.test(client))
+check('client reads a dropped conversation link',
+  /SESSION_ADDRESS = \/\\\/a\\\/\(/.test(client) && /text\/uri-list/.test(client))
+check('client quotes the dropped conversation through the input actions',
+  /insertQuote/.test(client) && /conversation\.composer\.dock/.test(client))
+check('client fetches the transcript inside the embedded page',
+  /history_messages/.test(client) && /chat_session_id/.test(client))
+check('client clears the drop report on its own',
+  /NOTE_TIMEOUT_MS/.test(client) && /function report\(text\)/.test(client))
+check('client keeps the sidebar foot as the only entry',
+  /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
 check('client anchors the panel to the trigger',
   /getBoundingClientRect/.test(client) && /position: 'fixed'/.test(client))
 check('client reads the first-run notice flag',
@@ -264,6 +271,15 @@ if (runtimeModule !== null) {
   check('dismissing the notice never throws', dismissThrew === null, dismissThrew ?? '')
   check('shortcut registered', plain.shortcuts.length === 1 &&
     plain.shortcuts[0].id === 'dsh-deepseek-web.open')
+  check('the drop target is mounted in a session seat',
+    plain.registered.some((entry) => entry.name === 'conversation.composer.dock'))
+  const drop = plain.registered.find((entry) => entry.name === 'conversation.composer.dock')
+  if (drop !== undefined && typeof drop.component === 'function') {
+    let idle = null, idleThrew = null
+    try { idle = drop.component({ ...drop.inject() }) } catch (error) { idleThrew = error.message }
+    check('the drop target draws nothing until a conversation arrives',
+      idleThrew === null && idle === null, idleThrew ?? '')
+  }
 
   const configured = mount({
     url: 'https://chat.deepseek.com',

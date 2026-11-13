@@ -51,6 +51,10 @@ window.__ModuleLoader__.load({
     var DICT = 'dshDeepseekWeb'
     var BROWSER_KIND = 'browser'
     var FOOTER_SLOT = 'sidebar.footer.action'
+    // A session-scoped seat used only as a mount point: the entry renders
+    // nothing and listens for a dropped conversation link while the session is
+    // on screen, which is where the input to quote into comes from.
+    var DROP_SLOT = 'conversation.composer.dock'
     var DEFAULT_URL = 'https://chat.deepseek.com'
     var NOTICE_KEY = 'dsh-deepseek-web.environment-notice-dismissed'
     var WEBVIEW_SELECTOR = 'webview[data-sidebar-browser-frame="webview"]'
@@ -62,6 +66,14 @@ window.__ModuleLoader__.load({
     // the page of the row `cordis.patch.yml` inserts, keyed `package#row`.
     var BUNDLE_KEY = NS
     var ROW_KEY = BUNDLE_KEY + '#' + BUNDLE_KEY
+
+    // A DeepSeek conversation is addressed as /a/<agent>/s/<session id>, and the
+    // page's own session list links to exactly that. A cross-frame drag can carry
+    // nothing but standard types, so the drop receives the address only and the
+    // transcript is fetched where the session cookie already lives.
+    var SESSION_ADDRESS = /\/a\/([A-Za-z0-9_-]+)\/s\/([A-Za-z0-9_-]+)/
+    var QUOTE_MAX_CHARS = 12000
+    var NOTE_TIMEOUT_MS = 6000
 
     // ------------------------------------------------------------------ copy
 
@@ -84,6 +96,12 @@ window.__ModuleLoader__.load({
       errNoSession: '当前没有前台会话，右侧栏无法放置标签页；进入一个会话后重试。',
       errBadUrl: '网页地址无效，仅支持不含账号密码的 http/https 地址。',
       errOpenFailed: '打开标签页失败；请确认右侧栏可用后重试。',
+      errNoTranscript: '未能读取该会话内容；请确认侧栏网页版已登录，且该会话仍然存在。',
+      errNoInput: '当前会话没有可插入引用的输入框，请先进入一个会话。',
+      quoteDetail: '来自侧栏 DeepSeek 网页版',
+      dropHint: '松开即可把这个会话引用到当前输入框',
+      quoted: '已把该会话作为引用插入输入框。',
+      emptyConversation: '该会话还没有可引用的内容。',
       errGeneric: '发生未预期的错误，请重试。',
       diag1: '再点一次侧栏底部图标；打开的标签页会被复用，不会堆叠。',
       diag2: '若要求重新登录：网页版登录态保存在进程内会话分区，DSH 重启后失效，需要重新登录——填写插件配置的账号密码可自动完成这一步。',
@@ -139,6 +157,12 @@ window.__ModuleLoader__.load({
       errNoSession: 'No session is on screen, so the sidebar cannot place a tab. Enter a session and retry.',
       errBadUrl: 'Invalid address. Only http/https URLs without embedded credentials are accepted.',
       errOpenFailed: 'Opening the tab failed; check that the right sidebar is available and retry.',
+      errNoTranscript: 'The conversation could not be read. Make sure the embedded web app is signed in and the conversation still exists.',
+      errNoInput: 'This session has no input to quote into; open a session first.',
+      quoteDetail: 'From the DeepSeek web app in the sidebar',
+      dropHint: 'Release to quote this conversation into the current input',
+      quoted: 'The conversation was quoted into the input.',
+      emptyConversation: 'That conversation has nothing to quote yet.',
       errGeneric: 'Unexpected error; please retry.',
       diag1: 'Click the sidebar foot icon again; the open tab is reused instead of stacking new ones.',
       diag2: 'If asked to sign in again: web login state lives in a process-local partition and is lost when DSH restarts. Filling in the configured credentials automates that step.',
@@ -237,6 +261,7 @@ window.__ModuleLoader__.load({
       color: C.secondary, fontSize: '12px', lineHeight: '18px',
     }
     var HINT_LINE = { margin: '2px 0' }
+    var DROP_HINT = Object.assign({}, SECTION, { color: C.link })
 
     // -------------------------------------------------------------- sidebar fit
     // The footer action slot supplies `{ wide }`: a call-to-action row at full
@@ -528,6 +553,127 @@ window.__ModuleLoader__.load({
       later(attempt, FILL_INTERVAL_MS)
     }
 
+    // ------------------------------------------------------------- transcript
+    // The dropped link names a conversation; its text lives behind the session
+    // cookie, so the read happens inside the guest page that already holds it.
+    // Nothing leaves this machine: the script only calls the site's own API with
+    // the visitor's own credentials.
+
+    function transcriptScript(sessionId) {
+      var id = JSON.stringify(String(sessionId))
+      return '(function(){' +
+        'var id=' + id + ';' +
+        'var token="";try{token=window.localStorage.getItem("userToken")||""}catch(error){}' +
+        'var headers={};if(token)headers.Authorization="Bearer "+token;' +
+        'var url="/api/v0/chat/history_messages?chat_session_id="+encodeURIComponent(id)+"&cache_version=null&cache_reset_at=null";' +
+        'return fetch(url,{credentials:"include",headers:headers}).then(function(response){' +
+        'if(!response.ok)return {ok:false,reason:"http "+response.status};' +
+        'return response.json()}).then(function(json){' +
+        'var body=json&&json.data;var code=body&&body.biz_code;' +
+        'if(code&&code!==0)return {ok:false,reason:"biz_code "+code};' +
+        'var data=body&&body.biz_data;if(!data)return {ok:false,reason:"no data"};' +
+        'var title=String((data.chat_session&&data.chat_session.title)||"");' +
+        'var messages=Array.isArray(data.chat_messages)?data.chat_messages:[];' +
+        'var lines=[];' +
+        'for(var i=0;i<messages.length;i+=1){' +
+        'var message=messages[i];var fragments=Array.isArray(message.fragments)?message.fragments:[];' +
+        'for(var j=0;j<fragments.length;j+=1){' +
+        'var fragment=fragments[j];var kind=String(fragment&&fragment.type||"");' +
+        'var who=kind==="REQUEST"?"用户":(kind==="RESPONSE"||kind==="TEMPLATE_RESPONSE"?"助手":"");' +
+        'if(!who)continue;var content=String(fragment.content||"").trim();if(!content)continue;' +
+        'lines.push("**"+who+"**："+content)}}' +
+        'return {ok:true,title:title,text:lines.join("\\n\\n")}' +
+        '}).catch(function(error){return {ok:false,reason:String((error&&error.message)||error)}})' +
+        '})()'
+    }
+
+    /** The conversation id carried by a dropped link, if the drop carries one. */
+    function droppedSessionId(transfer) {
+      if (!transfer || typeof transfer.getData !== 'function') return ''
+      var types = []
+      try {
+        types = Array.prototype.slice.call(transfer.types || [])
+      } catch (error) { types = [] }
+      var order = ['text/uri-list', 'text/plain', 'text/html']
+      var seen = []
+      for (var index = 0; index < order.length; index += 1) {
+        if (types.indexOf(order[index]) === -1) continue
+        var raw = ''
+        try { raw = String(transfer.getData(order[index]) || '') } catch (error) { raw = '' }
+        if (raw === '') continue
+        seen.push(raw)
+      }
+      // A drop with no standard type listed still exposes text/plain on some
+      // platforms; read it once more rather than guessing from the type list.
+      if (seen.length === 0) {
+        try {
+          var fallback = String(transfer.getData('text/plain') || '')
+          if (fallback !== '') seen.push(fallback)
+        } catch (error) { /* Nothing was carried. */ }
+      }
+      for (var at = 0; at < seen.length; at += 1) {
+        var match = SESSION_ADDRESS.exec(seen[at])
+        if (match !== null) return match[2]
+      }
+      return ''
+    }
+
+    /** The guest page showing the embedded web app, whichever host it is on. */
+    function webAppGuest() {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null
+      var nodes
+      try { nodes = document.querySelectorAll(WEBVIEW_SELECTOR) } catch (error) { return null }
+      var wanted = hostOf(settings.url)
+      var found = null
+      for (var index = 0; index < nodes.length; index += 1) {
+        var node = nodes[index]
+        var current = ''
+        try { current = typeof node.getURL === 'function' ? String(node.getURL() || '') : '' } catch (error) { current = '' }
+        if (current === '') continue
+        if (wanted !== '' && hostOf(current) === wanted) return node
+        if (found === null) found = node
+      }
+      return found
+    }
+
+    /**
+     * Read the dropped conversation and quote it into the current input.
+     * Returns a promise of an outcome code so the caller can report it.
+     */
+    function quoteDropped(sessionId, inputActions, t) {
+      if (!inputActions || typeof inputActions.insertQuote !== 'function') {
+        return Promise.resolve('no-input')
+      }
+      var page = webAppGuest()
+      if (page === null || typeof page.executeJavaScript !== 'function') {
+        return Promise.resolve('no-transcript')
+      }
+      var outcome
+      try {
+        outcome = page.executeJavaScript(transcriptScript(sessionId), true)
+      } catch (error) {
+        return Promise.resolve('no-transcript')
+      }
+      if (!outcome || typeof outcome.then !== 'function') return Promise.resolve('no-transcript')
+      return outcome.then(function (result) {
+        var payload = result
+        if (typeof payload === 'string') {
+          try { payload = JSON.parse(payload) } catch (error) { payload = null }
+        }
+        if (!payload || payload.ok !== true) return 'no-transcript'
+        var text = String(payload.text || '').trim()
+        if (text === '') return 'empty-conversation'
+        if (text.length > QUOTE_MAX_CHARS) text = text.slice(0, QUOTE_MAX_CHARS) + '\n…'
+        var title = String(payload.title || '').trim()
+        var summary = { label: t('quoteDetail') }
+        if (title !== '') summary.title = title
+        var accepted = inputActions.insertQuote(text, summary)
+        return accepted === false ? 'no-input' : 'quoted'
+      }, function () {
+        return 'no-transcript'
+      })
+    }
+
     // ------------------------------------------------------------ controller
 
     function createController(ctx) {
@@ -667,6 +813,124 @@ window.__ModuleLoader__.load({
           d: 'M8 1.4C4.3 1.4 1.4 3.9 1.4 6.9c0 1.7.9 3.2 2.3 4.2V14l2.5-1.3c.6.1 1.2.2 1.8.2 3.7 0 6.6-2.5 6.6-5.5S11.7 1.4 8 1.4Z',
           fill: 'currentColor',
         }),
+      )
+    }
+
+    // ------------------------------------------------------------ drop target
+    // A conversation dragged out of the embedded web app arrives as an ordinary
+    // link, so the drop is caught at the document level: the composer's own
+    // handler only looks at files, and a dragover that carries no conversation
+    // address is left alone.
+
+    function carriesConversation(transfer) {
+      if (droppedSessionId(transfer) !== '') return true
+      if (!transfer || typeof transfer.getData !== 'function') return false
+      // During dragover most engines refuse getData, so the type list is the only
+      // signal left. A link drag lists `text/uri-list`; a drag of selected text
+      // does not, and that one has to keep working as it always did.
+      var types = []
+      try { types = Array.prototype.slice.call(transfer.types || []) } catch (error) { return false }
+      return types.indexOf('text/uri-list') !== -1
+    }
+
+    /**
+     * Session-scoped listener that turns a dropped conversation link into a
+     * quote in this input. Renders a line only while a candidate is dragged in.
+     */
+    function DropTarget(props) {
+      var t = props.t
+      // Session-scoped seats project `inputActions` as a standard prop, so the
+      // quote goes into the input of the session this entry belongs to.
+      var inputActions = props.inputActions
+
+      var hintPair = React.useState(false)
+      var hinted = hintPair[0]
+      var setHinted = hintPair[1]
+
+      var notePair = React.useState('')
+      var note = notePair[0]
+      var setNote = notePair[1]
+
+      React.useEffect(function () {
+        if (typeof document === 'undefined') return undefined
+        var depth = 0
+        var reportTimer = null
+
+        // The report is a one-line answer to a finished drag, not a status that
+        // should stay: it clears itself so the composer keeps its usual shape.
+        function report(text) {
+          setNote(text)
+          if (reportTimer !== null) clearTimeout(reportTimer)
+          reportTimer = setTimeout(function () {
+            reportTimer = null
+            setNote('')
+          }, NOTE_TIMEOUT_MS)
+        }
+
+        function onDragEnter(event) {
+          if (!event.dataTransfer) return
+          if (!carriesConversation(event.dataTransfer)) return
+          depth += 1
+          setHinted(true)
+        }
+
+        function onDragOver(event) {
+          if (!event.dataTransfer) return
+          if (!carriesConversation(event.dataTransfer)) return
+          // Taking the event keeps the browser from navigating to the link.
+          event.preventDefault()
+          if (event.dataTransfer.dropEffect !== undefined) event.dataTransfer.dropEffect = 'copy'
+          // The payload stays unreadable until the drop, so the face follows the
+          // type list here and the conversation itself is resolved on drop.
+          setHinted(true)
+        }
+
+        function onDragLeave() {
+          depth -= 1
+          if (depth <= 0) {
+            depth = 0
+            setHinted(false)
+          }
+        }
+
+        function onDrop(event) {
+          var sessionId = event.dataTransfer ? droppedSessionId(event.dataTransfer) : ''
+          depth = 0
+          setHinted(false)
+          if (sessionId === '') return
+          event.preventDefault()
+          event.stopPropagation()
+          quoteDropped(sessionId, inputActions, t).then(function (outcome) {
+            if (outcome === 'quoted') report(t('quoted'))
+            else if (outcome === 'no-input') report(t('errNoInput'))
+            else if (outcome === 'empty-conversation') report(t('emptyConversation'))
+            else report(t('errNoTranscript'))
+          }, function () { report(t('errNoTranscript')) })
+        }
+
+        document.addEventListener('dragenter', onDragEnter, true)
+        document.addEventListener('dragover', onDragOver, true)
+        document.addEventListener('dragleave', onDragLeave, true)
+        document.addEventListener('drop', onDrop, true)
+        return function () {
+          document.removeEventListener('dragenter', onDragEnter, true)
+          document.removeEventListener('dragover', onDragOver, true)
+          document.removeEventListener('dragleave', onDragLeave, true)
+          document.removeEventListener('drop', onDrop, true)
+          if (reportTimer !== null) {
+            clearTimeout(reportTimer)
+            reportTimer = null
+          }
+        }
+      }, [inputActions, t])
+
+      if (!hinted && note === '') return null
+      return h(
+        'div',
+        { style: SECTION, 'data-dsh-deepseek-web-drop': 'true' },
+        hinted
+          ? h('p', { style: HINT_LINE }, t('dropHint'))
+          : h('p', { style: HINT_LINE }, note),
       )
     }
 
@@ -1237,6 +1501,24 @@ window.__ModuleLoader__.load({
         }
       } catch (error) {
         console.warn('dsh-deepseek-web: shortcut registration failed', error)
+      }
+
+      // The drop target needs a session on screen to have an input to quote
+      // into, so it lives in a session-scoped seat and draws nothing on its own.
+      try {
+        ctx.slots.inject(DROP_SLOT, function () {
+          return ctx.slots.register({
+            name: DROP_SLOT,
+            id: NS + '-drop',
+            order: 90,
+            locale: DICT,
+            inject: function () {
+              return { t: t }
+            },
+          }, DropTarget)
+        })
+      } catch (error) {
+        console.warn('dsh-deepseek-web: registering the drop target failed', error)
       }
 
       try {
