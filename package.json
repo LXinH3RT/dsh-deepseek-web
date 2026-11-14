@@ -1,7 +1,7 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "2.1.1",
-  "description": "Open the DeepSeek web app inside the native right-Sidebar Browser tab of DeepSeek Harness, and quote its conversations into the current one.",
+  "version": "2.2.0",
+  "description": "Open the DeepSeek web app inside the native right-Sidebar Browser tab of DeepSeek Harness, quote its conversations into the current one, or start a new session from one.",
   "private": true,
   "type": "module",
   "main": "./index.js",

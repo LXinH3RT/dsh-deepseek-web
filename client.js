@@ -111,8 +111,11 @@ window.__ModuleLoader__.load({
       errNoAddress: '拖入的内容里没有可识别的会话地址。',
       quoteDetail: '来自侧栏 DeepSeek 网页版',
       dropHint: '松开即可把这个会话引用到当前输入框',
+      dropNewHint: '松开即可用这个会话新建对话',
       quoted: '已把该会话作为引用插入输入框。',
       emptyConversation: '该会话还没有可引用的内容。',
+      newSessionStarted: '已新建会话，并把该会话内容放进输入框。',
+      errNoWorkspace: '无法新建会话：工作区服务未就绪，或还没有任何工作区。',
       errGeneric: '发生未预期的错误，请重试。',
       diag1: '再点一次侧栏底部图标；打开的标签页会被复用，不会堆叠。',
       diag2: '若要求重新登录：网页版登录态保存在进程内会话分区，DSH 重启后失效，需要重新登录——填写插件配置的账号密码可自动完成这一步。',
@@ -173,8 +176,11 @@ window.__ModuleLoader__.load({
       errNoAddress: 'The dropped content carries no recognisable conversation address.',
       quoteDetail: 'From the DeepSeek web app in the sidebar',
       dropHint: 'Release to quote this conversation into the current input',
+      dropNewHint: 'Release to start a new session from this conversation',
       quoted: 'The conversation was quoted into the input.',
       emptyConversation: 'That conversation has nothing to quote yet.',
+      newSessionStarted: 'A new session was started with the conversation in its input.',
+      errNoWorkspace: 'No session can be started: the workspace service is unavailable, or no workspace exists yet.',
       errGeneric: 'Unexpected error; please retry.',
       diag1: 'Click the sidebar foot icon again; the open tab is reused instead of stacking new ones.',
       diag2: 'If asked to sign in again: web login state lives in a process-local partition and is lost when DSH restarts. Filling in the configured credentials automates that step.',
@@ -707,14 +713,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Read the dropped conversation and quote it into the current input.
-     * Resolves to `{ status, detail }` so the caller can report what happened:
-     * the detail is the concrete reason a read failed, not a generic sentence.
+     * Whether a drop landed on the composer card. The card is the capsule that
+     * holds the input, so a drop there means "quote into this input"; the same
+     * drag released anywhere else means "start a new session from it".
      */
-    function quoteDropped(sessionId, inputActions, t) {
-      if (!inputActions || typeof inputActions.insertQuote !== 'function') {
-        return Promise.resolve({ status: 'no-input', detail: 'no input actions' })
-      }
+    function insideComposer(node) {
+      if (!node || typeof node.closest !== 'function') return false
+      try { return node.closest('[data-composer-card]') !== null } catch (error) { return false }
+    }
+
+    /**
+     * Read the dropped conversation from inside the embedded page.
+     * Resolves to `{ status: 'read', text, title }` or a failure with the
+     * concrete reason, so both the quote and the new-session path can report it.
+     */
+    function readTranscript(sessionId) {
       var page = webAppGuest()
       if (page === null) {
         return Promise.resolve({ status: 'no-transcript', detail: 'no web view' })
@@ -743,14 +756,49 @@ window.__ModuleLoader__.load({
         var text = String(payload.text || '').trim()
         if (text === '') return { status: 'empty-conversation', detail: 'no messages' }
         if (text.length > QUOTE_MAX_CHARS) text = text.slice(0, QUOTE_MAX_CHARS) + '\n…'
-        var title = String(payload.title || '').trim()
-        var summary = { label: t('quoteDetail') }
-        if (title !== '') summary.title = title
-        var accepted = inputActions.insertQuote(text, summary)
-        if (accepted === false) return { status: 'no-input', detail: 'insertQuote refused' }
-        return { status: 'quoted', detail: '' }
+        return { status: 'read', detail: '', text: text, title: String(payload.title || '').trim() }
       }, function (error) {
         return { status: 'no-transcript', detail: 'read failed: ' + messageOf(error) }
+      })
+    }
+
+    /**
+     * Read the dropped conversation and quote it into the current input.
+     * Resolves to `{ status, detail }` so the caller can report what happened:
+     * the detail is the concrete reason a read failed, not a generic sentence.
+     */
+    function quoteDropped(sessionId, inputActions, t) {
+      if (!inputActions || typeof inputActions.insertQuote !== 'function') {
+        return Promise.resolve({ status: 'no-input', detail: 'no input actions' })
+      }
+      return readTranscript(sessionId).then(function (outcome) {
+        if (outcome.status !== 'read') return outcome
+        var summary = { label: t('quoteDetail') }
+        if (outcome.title !== '') summary.title = outcome.title
+        var accepted = inputActions.insertQuote(outcome.text, summary)
+        if (accepted === false) return { status: 'no-input', detail: 'insertQuote refused' }
+        return { status: 'quoted', detail: '' }
+      })
+    }
+
+    /**
+     * Read the dropped conversation and open a new session with its text as the
+     * initial draft. `startSession` is the official entry point; it returns
+     * nothing and reports its own failures, so this only settles the part it can
+     * observe: whether the address was read and whether the call was accepted.
+     */
+    function startSessionFrom(sessionId, workspace, t) {
+      return readTranscript(sessionId).then(function (outcome) {
+        if (outcome.status !== 'read') return outcome
+        if (!workspace || typeof workspace.startSession !== 'function') {
+          return { status: 'no-workspace', detail: 'no uiWorkspace service' }
+        }
+        try {
+          workspace.startSession(undefined, { prompt: outcome.text, whenDraftExists: 'append' })
+        } catch (error) {
+          return { status: 'no-workspace', detail: 'startSession threw: ' + messageOf(error) }
+        }
+        return { status: 'started', detail: '' }
       })
     }
 
@@ -913,16 +961,20 @@ window.__ModuleLoader__.load({
 
     /**
      * Session-scoped listener that turns a dropped conversation link into a
-     * quote in this input. The report is painted as a fixed overlay so it never
-     * takes part in the composer's layout.
+     * quote in this input, or — when released outside the composer card — into
+     * a fresh session whose draft is that conversation. The report is painted as
+     * a fixed overlay so it never takes part in the composer's layout.
      */
     function DropTarget(props) {
       var t = props.t
+      // Resolved lazily on drop: the workspace service is only needed for the
+      // new-session path, and it must not be required for the quote path.
+      var getWorkspace = props.getWorkspace
       // Session-scoped seats project `inputActions` as a standard prop, so the
       // quote goes into the input of the session this entry belongs to.
       var inputActions = props.inputActions
 
-      var hintPair = React.useState(false)
+      var hintPair = React.useState('')
       var hinted = hintPair[0]
       var setHinted = hintPair[1]
 
@@ -946,11 +998,17 @@ window.__ModuleLoader__.load({
           }, NOTE_TIMEOUT_MS)
         }
 
+        // The face of the hint follows the pointer: over the capsule the drop
+        // quotes into the input, anywhere else it starts a new session.
+        function faceOf(node) {
+          return t(insideComposer(node) ? 'dropHint' : 'dropNewHint')
+        }
+
         function onDragEnter(event) {
           if (!event.dataTransfer) return
           if (!carriesConversation(event.dataTransfer)) return
           depth += 1
-          setHinted(true)
+          setHinted(faceOf(event.target))
         }
 
         function onDragOver(event) {
@@ -960,23 +1018,24 @@ window.__ModuleLoader__.load({
           event.preventDefault()
           if (event.dataTransfer.dropEffect !== undefined) event.dataTransfer.dropEffect = 'copy'
           // The payload stays unreadable until the drop, so the face follows the
-          // type list here and the conversation itself is resolved on drop.
-          setHinted(true)
+          // pointer target here and the conversation itself is resolved on drop.
+          setHinted(faceOf(event.target))
         }
 
         function onDragLeave() {
           depth -= 1
           if (depth <= 0) {
             depth = 0
-            setHinted(false)
+            setHinted('')
           }
         }
 
         function onDrop(event) {
           var sessionId = event.dataTransfer ? droppedSessionId(event.dataTransfer) : ''
-          var candidate = hinted
+          var candidate = hinted !== ''
+          var quoted = insideComposer(event.target)
           depth = 0
-          setHinted(false)
+          setHinted('')
           if (sessionId === '') {
             // A drag that announced itself as a conversation but carries no
             // address is reported: staying silent would look like a dead button.
@@ -989,14 +1048,20 @@ window.__ModuleLoader__.load({
           }
           event.preventDefault()
           event.stopPropagation()
-          quoteDropped(sessionId, inputActions, t).then(function (outcome) {
-            if (outcome.status === 'quoted') { report(t('quoted')); return }
-            var head = outcome.status === 'no-input'
+          var outcome = quoted
+            ? quoteDropped(sessionId, inputActions, t)
+            : startSessionFrom(sessionId, props.getWorkspace(), t)
+          outcome.then(function (result) {
+            if (result.status === 'quoted') { report(t('quoted')); return }
+            if (result.status === 'started') { report(t('newSessionStarted')); return }
+            var head = result.status === 'no-input'
               ? t('errNoInput')
-              : outcome.status === 'empty-conversation' ? t('emptyConversation') : t('errNoTranscript')
+              : result.status === 'no-workspace'
+                ? t('errNoWorkspace')
+                : result.status === 'empty-conversation' ? t('emptyConversation') : t('errNoTranscript')
             // The reason is part of the report: without it the only thing left
             // is a sentence that says nothing about what actually failed.
-            report(outcome.detail ? head + ' (' + outcome.detail + ')' : head)
+            report(result.detail ? head + ' (' + result.detail + ')' : head)
           }, function (error) { report(t('errNoTranscript') + ' (' + messageOf(error) + ')') })
         }
 
@@ -1014,13 +1079,13 @@ window.__ModuleLoader__.load({
             reportTimer = null
           }
         }
-      }, [inputActions, t])
+      }, [getWorkspace, inputActions, t])
 
-      if (!hinted && note === '') return null
+      if (hinted === '' && note === '') return null
       var line = h(
         'p',
         { style: DROP_HINT, 'data-dsh-deepseek-web-drop': 'true', role: 'status' },
-        hinted ? t('dropHint') : note,
+        hinted !== '' ? hinted : note,
       )
       // The composer dock is inside the conversation column, so the hint is
       // portalled to the document body to stay out of that layout entirely.
@@ -1602,6 +1667,7 @@ window.__ModuleLoader__.load({
 
       // The drop target needs a session on screen to have an input to quote
       // into, so it lives in a session-scoped seat and draws nothing on its own.
+      // The same listener owns the new-session path, which needs the context.
       try {
         ctx.slots.inject(DROP_SLOT, function () {
           return ctx.slots.register({
@@ -1610,7 +1676,16 @@ window.__ModuleLoader__.load({
             order: 90,
             locale: DICT,
             inject: function () {
-              return { t: t }
+              return {
+                t: t,
+                getWorkspace: function () {
+                  try {
+                    return typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
+                  } catch (error) {
+                    return undefined
+                  }
+                },
+              }
             },
           }, DropTarget)
         })

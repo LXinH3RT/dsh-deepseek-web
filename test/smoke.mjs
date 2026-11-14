@@ -105,9 +105,12 @@ check('client unwraps the site token before reading a transcript',
 check('client stamps the site client identity on the transcript request',
   /x-client-platform/.test(client) && /x-client-version/.test(client))
 check('client reports the concrete reason a read failed',
-  /status: 'no-transcript', detail:/.test(client) && /outcome\.detail/.test(client))
+  /status: 'no-transcript', detail:/.test(client) && /result\.detail/.test(client))
 check('client keeps the drop report out of the composer flow',
   /position: 'fixed'/.test(client) && /createPortal/.test(client))
+check('client starts a session when the conversation lands outside the input',
+  /startSessionFrom/.test(client) && /insideComposer/.test(client) &&
+  /whenDraftExists: 'append'/.test(client))
 check('client keeps the sidebar foot as the only entry',
   /FOOTER_SLOT = 'sidebar\.footer\.action'/.test(client))
 check('client anchors the panel to the trigger',
@@ -287,6 +290,15 @@ if (runtimeModule !== null) {
     try { idle = drop.component({ ...drop.inject() }) } catch (error) { idleThrew = error.message }
     check('the drop target draws nothing until a conversation arrives',
       idleThrew === null && idle === null, idleThrew ?? '')
+    let workspaceLookup = null, lookupThrew = null
+    try {
+      const face = drop.inject()
+      workspaceLookup = typeof face.getWorkspace === 'function' ? face.getWorkspace() : undefined
+    } catch (error) { lookupThrew = error.message }
+    // Without a workspace service the new-session path must stay a reported
+    // failure, not an exception thrown out of the drop handler.
+    check('the drop target asks for the workspace service lazily',
+      lookupThrew === null && workspaceLookup === undefined, lookupThrew ?? '')
   }
 
   const configured = mount({
